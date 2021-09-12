@@ -1,0 +1,73 @@
+# This is configuration for standard experiment. Please refer to config.py for more details.
+name: 'FaceHuman-KD-attention'
+description: >
+    Default configuration for synthesis of face & human.
+    Core method: Knowledge Distillation + Attention feature matching + infoNCE
+n_sample: 64
+resolution: 256
+classes:
+- 'face'
+- 'DeepFashion'
+
+ADA:
+  enabled: false
+  target: 0.6  # set 0 to fix prob.
+  p: 0.0
+  interval: 4
+  kimg: 500
+  # KWARGS:
+
+DATASET:
+  name: DeepFashion
+  roots:
+    - '~/data/deepfashion'
+  source:
+    - 'align_1.2'
+  xflip: true
+  workers: 4
+  pin_memory: true
+
+MODEL:
+  z_dim: 512
+  w_dim: 512
+
+  MAPPING:
+    num_layers: 8
+    # embed_dim: 512
+    # layer_dim: 512
+    lrmul: 0.01
+  
+  SYNTHESIS:
+    bottom_res: 4
+    pose_on: true
+    pose_encoder_kwargs:
+      name: HeatmapSplitsEncoder
+      max_channels: 512
+      heatmap_size: 256
+      channel_splits: [5, 12]
+
+TRAIN:
+  iteration: 100
+  batch_gpu: 8
+  lrate: 0.002
+  r1: 10
+  path_reg_gain: 2
+  path_bs_shrink: 2
+  Greg_every: 8
+  Dreg_every: 16
+  style_mixing_prob: 0.0
+  ckpt: ''
+  save_ckpt_every: 6250
+  ckpt_max_keep: -1
+  sample_every: 6250
+
+EVAL:
+  metrics: 'fid'
+  FID:
+    dataset: ''
+    every: 6250
+    batch_size: 8
+    n_sample: 50000
+    inception_cache: ''
+    sample_dir: ''
+
