@@ -155,6 +155,8 @@ class Generator(nn.Module):
         assert len(classes) == 2
         assert mode in ['split', 'joint']
         super(Generator, self).__init__()
+        if freeze_teacher:
+            assert mode == 'split', "Only supprt split mode for freeze teacher Net now"
 
         self.z_dim = z_dim
         self.w_dim = w_dim
@@ -233,6 +235,13 @@ class Generator(nn.Module):
         w = self.mapping[self.classes[1]](z, c=c, broadcast=self.num_layers)
         img, _ = self.synthesis[self.classes[1]](w, pose=pose)
         return img
+
+    def requires_grad_with_freeze_(self, requires_grad: bool) -> None:
+        for name, para in self.named_parameters():
+            if self.freeze_teacher and self.classes[0] in name:
+                para.requires_grad_(False)
+            else:
+                para.requires_grad_(requires_grad)
 
 
 class Discriminator(nn.Module):

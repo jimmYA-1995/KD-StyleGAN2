@@ -21,7 +21,7 @@ from config import *
 from dataset import get_dataset
 from losses import *
 from misc import *
-from models import create_model
+from models import *
 from torch_utils.misc import print_module_summary
 
 
@@ -66,7 +66,7 @@ class Trainer():
         self._samples = None
 
         self.g, self.d = create_model(cfg, device=self.device)
-        self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
+        self.g_ema = copy.deepcopy(self.g).eval()
 
         # Define optimizers with Lazy regularizer
         g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1)
@@ -100,6 +100,10 @@ class Trainer():
         self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
+        elif cfg.MODEL.teacher_weight:
+            self.log.info(f"resume teacher Net from {cfg.MODEL.teacher_weight}")
+            ckpt = torch.load(cfg.MODEL.teacher_weight)['g_ema']
+            resume_teacherNet_from_NV_weights(self.g, ckpt, verbose=debug)
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
@@ -337,7 +341,7 @@ class Trainer():
 
     def Dmain(self, data, r1_reg=False):
         """ GAN loss & (opt.)R1 regularization """
-        self.g.requires_grad_(False)
+        self.g.requires_grad_with_freeze_(False)
         self.d.requires_grad_(True)
 
         loss_Dmain = loss_Dr1 = 0
@@ -380,7 +384,7 @@ class Trainer():
         self.d_scaler.update()
 
     def Gmain(self, data, pl_reg=False):
-        self.g.requires_grad_(True)
+        self.g.requires_grad_with_freeze_(True)
         self.d.requires_grad_(False)
 
         z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)

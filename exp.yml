@@ -32,6 +32,7 @@ MODEL:
   w_dim: 512
   mode: 'split'
   freeze_teacher: false
+  teacher_weight: 'NV-face-weight.pt'
   attn_res: 64
 
   MAPPING:
@@ -70,7 +71,7 @@ TRAIN:
     every: 5
 
 EVAL:
-  metrics: 'fid'
+  metrics: ''
   FID:
     dataset: ''
     every: 6250
