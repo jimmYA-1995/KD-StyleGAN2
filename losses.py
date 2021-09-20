@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from torch import autograd
 
 
-__all__ = ['MaskedRecLoss', 'logistic_loss', 'r1_loss', 'nonsaturating_loss', 'path_regularize']
+__all__ = ['MaskedRecLoss', 'r1_loss', 'path_regularize']
 
 
 def gaussian_kernel(size, sigma=2., dim=2, channels=3):

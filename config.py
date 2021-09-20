@@ -29,6 +29,7 @@ _C.MODEL.z_dim = 512
 _C.MODEL.w_dim = 512
 _C.MODEL.mode = ''  # ['split', 'join']
 _C.MODEL.freeze_teacher = False
+_C.MODEL.teacher_weight = ''
 _C.MODEL.attn_res = 64  # apply attention up to x
 
 _C.MODEL.MAPPING = CN()
