@@ -198,4 +198,3 @@ if __name__ == "__main__":
     )
     data = next(iter(loader))
     print("finish")
-

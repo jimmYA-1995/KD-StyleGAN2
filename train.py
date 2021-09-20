@@ -86,7 +86,7 @@ class Trainer():
         # if cfg.ADA.enabled:
         #     self.augment_pipe = AugmentPipe(**cfg.ADA.KWARGS).train().requires_grad_(False).to(self.device)
         #     if 'ada_p' not in self.stats:
-        #         self.stats['ada_p'] = torch.as_tensor(cfg.ADA.p, device=self.device)                 
+        #         self.stats['ada_p'] = torch.as_tensor(cfg.ADA.p, device=self.device)
         #     self.augment_pipe.p.copy_(self.stats['ada_p'])
         #     if cfg.ADA.target > 0:
         #         self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
@@ -210,7 +210,7 @@ class Trainer():
             sampler = torch.utils.data.RandomSampler(ds)
         else:
             sampler = torch.utils.data.SequentialSampler(ds)
-        
+
         return sampler
 
     def sample_forever(self, loader, pbar=False):
@@ -248,10 +248,10 @@ class Trainer():
         if self.start_iter >= self.cfg.TRAIN.iteration:
             self.log.info(f"Training target has already achieved. training iter "
                           f"from ckpt {self.start_iter} v.s. target iteration {self.cfg.TRAIN.iteration}")
-            
+
         ckpt = torch.load(ckpt_path, map_location=self.device)
         self.log.info(f'resume from {ckpt_path}')
-        
+
         for key, value in ckpt.items():
             if key not in self.ckpt_required_keys:
                 self.log.warning(f"Missed key: {key}")
@@ -263,7 +263,7 @@ class Trainer():
                 continue
 
             if key == 'stats':
-                self.stats.update(value)                
+                self.stats.update(value)
             else:
                 obj.load_state_dict(value)
 
@@ -321,7 +321,7 @@ class Trainer():
 
             self.ema(ema_beta=ema_beta)
             self.reduce_stats()
-            
+
             # FID
 
             if (i + 1) % self.cfg.TRAIN.CKPT.every == 0:
@@ -329,11 +329,9 @@ class Trainer():
 
             if (i + 1) % self.cfg.TRAIN.SAMPLE.every == 0:
                 self.sampling(i + 1)
-            
+
             if self.local_rank == 0:
                 self.log_wandb(step=i)
-
-
 
         self.clear()
 
@@ -483,7 +481,7 @@ class Trainer():
 
         _samples = [fake_imgs['face'], fake_imgs['human'], self.vis_kp]
         samples = torch.stack(_samples, dim=1).flatten(0, 1)
-        
+
         save_image(
             samples,
             self.outdir / 'samples' / f'fake-{i :06d}.png',
@@ -495,6 +493,7 @@ class Trainer():
     def clear(self):
         if getattr(self, 'pbar', None):
             self.pbar.close()
+
 
 if __name__ == "__main__":
     args = get_cmdline_args()

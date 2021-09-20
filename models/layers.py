@@ -16,7 +16,7 @@ class DenseLayer(nn.Module):
         out_dim: int,
         use_bias: bool = True,
         bias_init: int = 0,
-        activation: str = 'lrelu',
+        activation: str = 'linear',
         lrmul: int = 1,  # learning rate multiplier
     ) -> nn.Module:
         assert activation in AVAILABLE_ACTIVATIONS
@@ -192,8 +192,8 @@ class SynthesisLayer(nn.Module):
         self.act_gain = bias_act.activation_funcs[activation].def_gain
 
         if use_noise:
-            self.register_buffer('noise_const', torch.randn([1, 1, resolution, resolution]))  # only used by G_ema
-            self.noise_strength = nn.Parameter(torch.zeros([1]))
+            self.register_buffer('noise_const', torch.randn([resolution, resolution]))  # only used by G_ema
+            self.noise_strength = nn.Parameter(torch.zeros([]))
 
     def __repr__(self):
         return (f'{self.__class__.__name__}({self.input_shape} -> {self.output_shape}, act={self.activation}, noise={self.use_noise})')
@@ -297,13 +297,13 @@ class ToRGB(nn.Module):
         self.affine = DenseLayer(w_dim, in_channels, bias_init=1)
         self.weight = nn.Parameter(torch.randn([out_channels, in_channels, 1, 1]))
         self.bias = nn.Parameter(torch.zeros([out_channels]))
-        self.weight_gain = 1 / in_channels
+        self.weight_gain = 1 / np.sqrt(in_channels)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter(resample_filter))
         self.conv_clamp = conv_clamp
 
     def forward(self, x, w, skip=None):
-        styles = self.affine(w)
-        weight = self.weight * self.weight_gain
+        styles = self.affine(w) * self.weight_gain
+        weight = self.weight
         x = modulated_conv2d(x, weight, styles, demodulate=False)
         x = bias_act.bias_act(x, self.bias.to(x.dtype), clamp=self.conv_clamp)
 

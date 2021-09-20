@@ -30,7 +30,7 @@ DATASET:
 MODEL:
   z_dim: 512
   w_dim: 512
-  mode: 'joint'
+  mode: 'split'
   freeze_teacher: false
   attn_res: 64
 
@@ -43,6 +43,7 @@ MODEL:
   SYNTHESIS:
     img_channels: 3
     bottom_res: 4
+    channel_base: 16384
     pose_encoder_kwargs:
       name: HeatmapEncoder
       max_channels: 512

@@ -22,6 +22,7 @@ class MappingNetwork(nn.Module):
         embed_dim: int = 512,            # Dimensionality of embbeding layers. Force to zero when num_classes = 1
         layer_dim: int = 512,            # Dimensionality of intermediate layers.
         lrmul: float = 0.01,             # Learning rate multiplier for the mapping layers.
+        activation='lrelu',              # activation for each layer except embedding(which is linear)
         normalize_latents: bool = True,  # Normalize latent vectors (Z) before feeding them to the mapping layers?
     ) -> nn.Module:
         super(MappingNetwork, self).__init__()
@@ -33,7 +34,7 @@ class MappingNetwork(nn.Module):
 
         if num_classes > 1:
             # with bias, no learning rate multiplier
-            self.embed = DenseLayer(num_classes, embed_dim, activation='linear')
+            self.embed = DenseLayer(num_classes, embed_dim)
         else:
             embed_dim = 0
 
@@ -41,7 +42,7 @@ class MappingNetwork(nn.Module):
         in_dim = z_dim + embed_dim
         for idx in range(num_layers):
             out_dim = w_dim if idx == num_layers - 1 else layer_dim
-            fc.append(DenseLayer(in_dim, out_dim, lrmul=lrmul))
+            fc.append(DenseLayer(in_dim, out_dim, lrmul=lrmul, activation=activation))
             in_dim = out_dim
         self.fc = nn.Sequential(*fc)
 
@@ -132,7 +133,7 @@ class SynthesisNetwork(nn.Module):
             x = getattr(self, f'b{res}_conv')(x, ws[:, res_log2 * 2 - 4], **layer_kwargs)
             if res <= self.return_feat_res and not on_forward:
                 feats[res] = x
-            
+
             img = getattr(self, f'b{res}_trgb')(x, ws[:, res_log2 * 2 - 3], skip=img)
 
         return img, feats
@@ -222,6 +223,16 @@ class Generator(nn.Module):
         if return_dlatent:
             return img, feats, ws
         return img, feats
+
+    def inference(self, z, pose):
+        """ forward only through target class(i.e. human) """
+        assert z.shape[1] == self.z_dim
+        c = None
+        if self.mode == 'joint':
+            c = torch.eye(len(self.classes))[-1:].repeat(z.shape[0], 1)  # target class is last
+        w = self.mapping[self.classes[1]](z, c=c, broadcast=self.num_layers)
+        img, _ = self.synthesis[self.classes[1]](w, pose=pose)
+        return img
 
 
 class Discriminator(nn.Module):
