@@ -36,6 +36,36 @@ class ContentEncoder(nn.Module):
 
 
 @register("pose")
+class HeatmapEncoder(nn.Module):
+    """ Wrapper of PoseEncoder which separate face & body part
+
+    """
+    def __init__(self, out_dim, out_channels, max_channels=512, heatmap_size=256, in_channels=17):
+        assert heatmap_size > out_dim
+        assert (out_dim & (out_dim - 1)) == 0
+        assert (heatmap_size & (heatmap_size - 1)) == 0
+        super(HeatmapEncoder, self).__init__()
+        self.heatmap_shape = (in_channels, heatmap_size, heatmap_size)
+        self.in_channels = in_channels
+        self.num_blocks = int(np.log2(heatmap_size // out_dim))
+        self.out_channels = {f"b{i}": min(32 * (2 ** i), max_channels) for i in range(1, self.num_blocks)}
+        self.out_channels[f"b{self.num_blocks}"] = out_channels
+
+        for i in range(1, self.num_blocks + 1):
+            out_channels = self.out_channels[f'b{i}']
+            self.add_module(f"b{i}", DBlock(in_channels, out_channels))
+            in_channels = out_channels
+
+    def forward(self, heatmaps):
+        assert heatmaps.shape[1] == self.in_channels, heatmaps.shape
+        x = heatmaps
+        for i in range(1, self.num_blocks + 1):
+            x = getattr(self, f"b{i}")(x)
+
+        return x
+
+
+@register("pose")
 class HeatmapSplitsEncoder(nn.Module):
     """ Wrapper of PoseEncoder which separate face & body part
 

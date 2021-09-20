@@ -29,13 +29,13 @@ class MappingNetwork(nn.Module):
 
         self.z_dim = z_dim
         self.num_classes = num_classes
-        self.embed_dim = embed_dim if num_classes > 1 else 0
-        self.layer_dim = layer_dim
         self.normalize_latents = normalize_latents
 
         if num_classes > 1:
             # with bias, no learning rate multiplier
             self.embed = DenseLayer(num_classes, embed_dim, activation='linear')
+        else:
+            embed_dim = 0
 
         fc = []
         in_dim = z_dim + embed_dim
@@ -45,7 +45,7 @@ class MappingNetwork(nn.Module):
             in_dim = out_dim
         self.fc = nn.Sequential(*fc)
 
-    def forward(self, z, c, broadcast=None, normalize_z=True):
+    def forward(self, z, c=None, broadcast=None, normalize_z=True):
         # Normalize, Embed & Concat if needed
         x = None
         if self.z_dim > 0:
@@ -55,7 +55,7 @@ class MappingNetwork(nn.Module):
                 x = normalize_2nd_moment(z)
 
         if self.num_classes > 1:
-            assert z.shape[0] == c.shape[0]
+            assert z.shape[0] == c.shape[0], f"{z.shape} v.s {c.shape}"
             assert c.shape[1] == self.num_classes
             y = normalize_2nd_moment(self.embed(c))  # .to(torch.float32)
             x = torch.cat([x, y], dim=1) if x is not None else y
@@ -75,32 +75,33 @@ class SynthesisNetwork(nn.Module):
         img_resolution: int,               # Output resolution
         img_channels: int = 3,             # Number of output color channels.
         bottom_res: int = 4,               # Resolution of bottom layer
-        pose_on: bool = False,             # Whether to use PoseEncoder
+        pose: bool = False,                # Whether to build Pose Encoder
+        const: bool = False,               # Whether to create const inputs
         pose_encoder_kwargs: dict = {},    # Kwargs for Pose Encoder when using pose encoder
+        return_feat_res: int = 64,         # the max resolution of features to return
         channel_base: int = 32768,         # Overall multiplier for the number of channels.
         channel_max: int = 512,            # Maximum number of channels in any layer.
-        architecture='skip',               # Architecture: 'orig', 'skip', 'resnet'.
         resample_filter=[1, 3, 3, 1],      # Low-pass filter to apply when resampling activations. None = no filtering.
     ):
         assert img_resolution & (img_resolution - 1) == 0
+        assert pose or const
         assert bottom_res & (bottom_res - 1) == 0 and bottom_res < img_resolution
         super(SynthesisNetwork, self).__init__()
 
         self.img_resolution = img_resolution
         self.img_channels = img_channels
         self.bottom_res = bottom_res
-        self.pose_on = pose_on
-        num_blocks = int(np.log2(img_resolution // bottom_res)) + 1
-        self.block_resolutions = [bottom_res * 2 ** i for i in range(num_blocks)]
+        self.pose = pose
+        self.return_feat_res = return_feat_res
+        self.num_blocks = int(np.log2(img_resolution // bottom_res)) + 1
+        self.block_resolutions = [bottom_res * 2 ** i for i in range(self.num_blocks)]
         self.channel_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
 
         # bottom
-        if pose_on:
-            self.bottom = build_pose_encoder(bottom_res, self.channel_dict[bottom_res], **pose_encoder_kwargs)
-            assert len(self.bottom.out_channel_splits) == 2
-        else:
-            self.bottom = nn.Parameter(torch.randn([self.channel_dict[bottom_res], bottom_res, bottom_res]))
-        assert pose_on  # ####################################
+        if pose:
+            self.pose_encoder = build_pose_encoder(bottom_res, self.channel_dict[bottom_res], **pose_encoder_kwargs)
+        if const:
+            self.const = nn.Parameter(torch.randn([self.channel_dict[bottom_res], bottom_res, bottom_res]))
 
         for res in self.block_resolutions:
             out_channels = self.channel_dict[res]
@@ -108,35 +109,33 @@ class SynthesisNetwork(nn.Module):
             if res > bottom_res:
                 in_channels = self.channel_dict[res // 2]
                 self.add_module(f'b{res}_convUp', SynthesisLayer(in_channels, out_channels, w_dim, res, up=2, resample_filter=resample_filter))
-            else:
-                self.add_module(f'b{res}_split', SplitSynthesisLayer(self.bottom.out_channel_splits, out_channels, w_dim, res, resample_filter=resample_filter))
+
             self.add_module(f'b{res}_conv', SynthesisLayer(out_channels, out_channels, w_dim, res, resample_filter=resample_filter))
             self.add_module(f'b{res}_trgb', ToRGB(out_channels, img_channels, w_dim, resample_filter=resample_filter))
 
-    def forward(self, ws, pose=None, **layer_kwargs):
-        if self.pose_on:
-            assert pose is not None and all(pose.shape[0] == w.shape[0] for w in ws)
-            btm_features = self.bottom(pose)
+    def forward(self, ws, pose=None, on_forward=False, **layer_kwargs):
+        if pose is not None:
+            assert self.pose
+            assert pose.shape[0] == ws.shape[0], f"{pose.shape[0]} v.s {ws.shape[0]}"
+            btm_features = self.pose_encoder(pose)
         else:
-            btm_features = self.bottom.unsqueeze(0).repeat(ws.shape[0], 1, 1, 1)
+            btm_features = self.const.unsqueeze(0).repeat(ws.shape[0], 1, 1, 1)
 
-        imgf = imgh = None
+        x = btm_features
+        img = None
+        feats = {}
         for res in self.block_resolutions:
             res_log2 = int(np.log2(res))
-            if res == self.bottom_res:
-                face, human = getattr(self, f'b{res}_split')(btm_features, [w[:, 0] for w in ws], **layer_kwargs)
-            else:
-                convUp = getattr(self, f'b{res}_convUp')
-                face = convUp(face, ws[0][:, res_log2 * 2 - 5], **layer_kwargs)
-                human = convUp(human, ws[1][:, res_log2 * 2 - 5], **layer_kwargs)
+            if res > self.bottom_res:
+                x = getattr(self, f'b{res}_convUp')(x, ws[:, res_log2 * 2 - 5], **layer_kwargs)
 
-            conv = getattr(self, f'b{res}_conv')
-            face = conv(face, ws[0][:, res_log2 * 2 - 4], **layer_kwargs)
-            human = conv(human, ws[1][:, res_log2 * 2 - 4], **layer_kwargs)
-            imgf = getattr(self, f'b{res}_trgb')(face, ws[0][:, res_log2 * 2 - 3], skip=imgf)
-            imgh = getattr(self, f'b{res}_trgb')(human, ws[1][:, res_log2 * 2 - 3], skip=imgh)
+            x = getattr(self, f'b{res}_conv')(x, ws[:, res_log2 * 2 - 4], **layer_kwargs)
+            if res <= self.return_feat_res and not on_forward:
+                feats[res] = x
+            
+            img = getattr(self, f'b{res}_trgb')(x, ws[:, res_log2 * 2 - 3], skip=img)
 
-        return imgf, imgh
+        return img, feats
 
 
 class Generator(nn.Module):
@@ -146,68 +145,99 @@ class Generator(nn.Module):
         w_dim: int,                        # Disentangled latent(W) dimension.
         classes: List[str],                # List of class name
         img_resolution: int,               # Output resolution.
-        img_channels: int = 3,             # Number of output color channels.
+        mode: str = 'split',               # split teacher & student
+        freeze_teacher: bool = False,      # whether to freeze teacher network
+        attn_res: int = 64,                # the max resolution applied by attention
         mapping_kwargs: dict = {},         # Arguments for MappingNetwork.
         synthesis_kwargs: dict = {},       # Arguments for SynthesisNetwork.
     ):
-        assert len(classes) > 0
+        assert len(classes) == 2
+        assert mode in ['split', 'joint']
         super(Generator, self).__init__()
 
         self.z_dim = z_dim
         self.w_dim = w_dim
         self.classes = classes
-        self.img_channels = img_channels
         self.img_resolution = img_resolution
+        self.mode = mode
+        self.freeze_teacher = freeze_teacher
+        self.attn_res = attn_res
 
         self.num_layers = int(np.log2(img_resolution)) * 2 - 2
-        self.synthesis = SynthesisNetwork(w_dim, img_resolution, img_channels=self.img_channels, **synthesis_kwargs)
 
-        self.mapping = MappingNetwork(z_dim, w_dim, len(classes), **mapping_kwargs)
+        mapping_args = (z_dim, w_dim)
+        synthesis_args = (w_dim, img_resolution)
+        synthesis_kwargs['return_feat_res'] = attn_res
+        if mode == 'joint':
+            synthesis1 = SynthesisNetwork(*synthesis_args, pose=True, const=True, **synthesis_kwargs)
+            self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
+            mapping1 = MappingNetwork(*mapping_args, num_classes=2, **mapping_kwargs)
+            self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping1]])
+            self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis1]])
+        else:
+            # 1: teacher Network, 2: student Network
+            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
+            synthesis2 = SynthesisNetwork(*synthesis_args, pose=True, **synthesis_kwargs)
+            self.heatmap_shape = synthesis2.pose_encoder.heatmap_shape
+            mapping1 = MappingNetwork(*mapping_args, num_classes=1, **mapping_kwargs)
+            mapping2 = MappingNetwork(*mapping_args, num_classes=1, **mapping_kwargs)
+            self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping2]])
+            self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis2]])
 
-    def forward(self, z, c=None, pose=None, return_dlatent=False, **synthesis_kwargs):
+        self.img_channels = synthesis1.img_channels
+        self.block_resolutions = synthesis1.block_resolutions
+        self.channel_dict = synthesis1.channel_dict
+        for res in self.block_resolutions:
+            if res > attn_res:
+                break
+            in_channels = self.channel_dict[res]
+            self.add_module(f'{res}_atten', MultiHeadAttention('relu', 4, in_channels, in_channels // 8))  # TODO support FAVOR+
+
+    def forward(self, z, pose, return_dlatent=False, on_forward=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
         # TODO enable style mixing training
         assert z.shape[1] == self.z_dim
         z = normalize_2nd_moment(z.to(torch.float32))
 
-        if self.synthesis.pose_on:
-            ws = self.get_all_dlatents(z)  # List[torch.Tensor]
-        else:
-            assert c is not None
-            ws = self.mapping(z, c, broadcast=self.num_layers, normalize_z=False)
+        if self.mode == 'joint':
+            c = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+            z = z.repeat(2, 1)
+            ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(2)
+            ws = {class_name: w for class_name, w in zip(self.classes, ws)}
+        else:  # split
+            ws = {}
+            for class_name, mapping in self.mapping.items():
+                ws[class_name] = mapping(z, broadcast=self.num_layers, normalize_z=False)
 
-        face, human = self.synthesis(ws, pose=pose, **synthesis_kwargs)
-        imgs = torch.cat([face, human], dim=1)
+        img, feats = {}, {}
+        for class_name, synthesis, p in zip(self.classes, self.synthesis.values(), (None, pose)):
+            img[class_name], feats[class_name] = synthesis(ws[class_name], pose=p, on_forward=on_forward, **synthesis_kwargs)
+
+        if not on_forward:
+            # attention
+            ref_c, c = self.classes
+            feats['atten'] = {}
+            for res in feats[ref_c].keys():
+                feats['atten'][res] = getattr(self, f'{res}_atten')(feats[ref_c][res], feats[c][res], None)  # TODO support FAVOR+
 
         if return_dlatent:
-            return imgs, ws
-        return imgs
-
-    def get_all_dlatents(self, z) -> List[torch.Tensor]:
-        """ Get dlatents for all classes at one forward pass. """
-
-        ws = []
-        cs = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1)
-        for c in cs:
-            w = self.mapping(z, c, broadcast=self.num_layers, normalize_z=False)
-            ws.append(w)
-
-        return ws
+            return img, feats, ws
+        return img, feats
 
 
 class Discriminator(nn.Module):
     def __init__(
         self,
-        num_classes,
-        img_resolution,
-        img_channels=3,
-        fmap_base=16 << 10,
-        fmap_decay=1.0,
-        fmap_min=1,
-        fmap_max=512,
-        mbstd_group_size=4,
-        mbstd_num_features=1,
-        resample_kernel=[1, 3, 3, 1],
+        num_classes: int,
+        img_resolution: int,
+        img_channels: int = 3,
+        top_res: int = 4,
+        channel_base: int = 32768,
+        channel_max: int = 512,
+        mbstd_group_size: int = 4,
+        mbstd_num_features: int = 1,
+        resample_filter: List[int] = [1, 3, 3, 1],
     ):
+        assert top_res < img_resolution
         assert isinstance(num_classes, int) and num_classes >= 1
         super(Discriminator, self).__init__()
         self.num_classes = num_classes
@@ -216,36 +246,33 @@ class Discriminator(nn.Module):
         self.mbstd_group_size = mbstd_group_size
         self.mbstd_num_features = mbstd_num_features
         self.resolution_log2 = int(np.log2(img_resolution))
+        self.block_resolutions = [2 ** i for i in range(self.resolution_log2, int(np.log2(top_res)), -1)]
+        channel_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [top_res]}
 
-        def nf(stage):
-            scaled = int(fmap_base / (2.0 ** (stage * fmap_decay)))
-            return np.clip(scaled, fmap_min, fmap_max)
-
-        self.frgb = Conv2dLayer(self.img_channels, nf(self.resolution_log2 - 1), kernel_size=1)
-
+        self.frgb = Conv2dLayer(self.img_channels, channel_dict[img_resolution], kernel_size=1)
         self.blocks = nn.ModuleList()
-        for res in range(self.resolution_log2, 2, -1):
-            self.blocks.append(DBlock(nf(res - 1), nf(res - 2)))
+        for res in self.block_resolutions:
+            self.add_module(f'b{res}', DBlock(channel_dict[res], channel_dict[res // 2], resample_filter=resample_filter))
 
         # output layer
-        self.conv_out = Conv2dLayer(nf(1) + mbstd_num_channels, nf(1))
-        self.dense_out = DenseLayer(512 * 4 * 4, nf(0))
-        self.label_out = DenseLayer(nf(0), num_classes)
+        self.conv_out = Conv2dLayer(channel_dict[top_res] + mbstd_num_channels, channel_dict[top_res], activation='lrelu')
+        self.dense_out = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
+        self.label_out = DenseLayer(channel_dict[top_res], num_classes)
 
-    def forward(self, img, labels_in=None):
+    def forward(self, img, c=None):
         assert img.shape[1] == self.img_channels, f"(D) channel unmatched. {img.shape[1]} v.s. {self.img_channels}"
 
         x = self.frgb(img)
-        for block in self.blocks:
-            x = block(x)
+        for res in self.block_resolutions:
+            x = getattr(self, f'b{res}')(x)
 
-        # TODO: FRGB if skip
+        # TODO FRGB if skip
         x = minibatch_stddev_layer(x, self.mbstd_group_size, self.mbstd_num_features)
         x = self.conv_out(x)
         x = x.view(x.shape[0], -1)
         x = self.dense_out(x)
         out = self.label_out(x)
-        if labels_in is not None:
-            out = torch.mean(out * labels_in, dim=1, keepdims=True)
+        if c is not None:
+            out = torch.mean(out * c, dim=1, keepdims=True)
 
         return out

@@ -74,18 +74,21 @@ def _cached_log_stream(filename):
 
 
 def master_only(func_or_method):
+    """
+    As using decorator on class method, it will be recognized as function
+    instead of method by inspect module. Thus, I just use parameter name to
+    decide whether it is class method or not.
+    """
     def wrapper(*args, **kwargs):
         signature = inspect.signature(func_or_method)
-        if inspect.isfunction(func_or_method):
-            assert list(signature.parameters.keys())[0] == 'local_rank'
-            local_rank = args[0]
-        elif inspect.ismethod(func_or_method):
-            assert list(signature.parameters.keys())[0] == 'self'
+        if list(signature.parameters.keys())[0] == 'self':
             obj = args[0]
             assert hasattr(obj, 'local_rank')
             local_rank = obj.local_rank
         else:
-            raise TypeError("Only support function or class methods")
+            assert list(signature.parameters.keys())[0] == 'local_rank', \
+                "assume local_rank is the first argumnet of function"
+            local_rank = args[0]
 
         if local_rank != 0:
             return

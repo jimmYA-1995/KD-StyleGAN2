@@ -21,12 +21,15 @@ _C.DATASET.sources = ['align_1.2']
 _C.DATASET.xflip = False
 # kwargs of data loader
 _C.DATASET.pin_memory = False
-_C.DATASET.workers = 4
+_C.DATASET.num_workers = 4
 
 # ------ Model ------
 _C.MODEL = CN()
 _C.MODEL.z_dim = 512
 _C.MODEL.w_dim = 512
+_C.MODEL.mode = ''  # ['split', 'join']
+_C.MODEL.freeze_teacher = False
+_C.MODEL.attn_res = 64  # apply attention up to x
 
 _C.MODEL.MAPPING = CN()
 _C.MODEL.MAPPING.num_layers = 8
@@ -34,13 +37,9 @@ _C.MODEL.MAPPING.embed_dim = 512  # Force to zero if no label(len(classes) == 1)
 _C.MODEL.MAPPING.layer_dim = 512
 _C.MODEL.MAPPING.lrmul = 0.01
 
-_C.MODEL.POSE_ENCODER = CN()
-_C.MODEL.POSE_ENCODER
-
 _C.MODEL.SYNTHESIS = CN()
-_C.MODEL.SYNTHESIS.architecture = 'skip'  # TODO: add other architectures
+_C.MODEL.SYNTHESIS.img_channels = 3
 _C.MODEL.SYNTHESIS.bottom_res = 4
-_C.MODEL.SYNTHESIS.pose_on = False
 _C.MODEL.SYNTHESIS.pose_encoder_kwargs = CN(new_allowed=True)
 _C.MODEL.SYNTHESIS.pose_encoder_kwargs.name = 'DefaultPoseEncoder'
 _C.MODEL.SYNTHESIS.channel_base = 32768
@@ -59,13 +58,16 @@ _C.TRAIN.R1 = CN()
 _C.TRAIN.R1.gamma = 10
 _C.TRAIN.R1.every = 16
 _C.TRAIN.style_mixing_prob = 0.9
-_C.TRAIN.ckpt = ''
-_C.TRAIN.save_ckpt_every = 2500
-_C.TRAIN.ckpt_max_keep = 10
-_C.TRAIN.sample_every = 1000
+_C.TRAIN.CKPT = CN()
+_C.TRAIN.CKPT.path = ''
+_C.TRAIN.CKPT.every = 2500
+_C.TRAIN.CKPT.max_keep = 10
+_C.TRAIN.SAMPLE = CN()
+_C.TRAIN.SAMPLE.every = 1000
+
 
 _C.ADA = CN()
-_C.ADA.enable = False
+_C.ADA.enabled = False
 _C.ADA.target = 0.6
 _C.ADA.p = 0.0
 _C.ADA.interval = 4

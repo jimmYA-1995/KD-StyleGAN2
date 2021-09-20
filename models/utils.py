@@ -10,9 +10,10 @@ def normalize_2nd_moment(x, dim=1, eps=1e-8):
 
 
 def build_pose_encoder(bottom_res: int, out_channels: int, **pose_encoder_kwargs) -> nn.Module:
-
     pose_encoder_name = pose_encoder_kwargs.pop('name')
-    return REGISTRY['pose'].get(pose_encoder_name)(bottom_res, out_channels, **pose_encoder_kwargs)
+    if pose_encoder_name not in REGISTRY['pose']:
+        raise ValueError(f"{pose_encoder_name} is not registered")
+    return REGISTRY['pose'][pose_encoder_name](bottom_res, out_channels, **pose_encoder_kwargs)
 
 
 def register(key):

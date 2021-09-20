@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_utils.ops import bias_act, conv2d_resample, upfirdn2d
 
+
 AVAILABLE_ACTIVATIONS = bias_act.activation_funcs.keys()
 
 
@@ -83,7 +84,7 @@ class Conv2dLayer(nn.Module):
         weight = self.weight * self.weight_gain
         x = conv2d_resample.conv2d_resample(x=x, w=weight.to(x.dtype), f=self.resample_filter,
                                             up=self.up, down=self.down, padding=self.padding, flip_weight=(self.up == 1))
-        
+
         b = self.bias.to(x.dtype) if self.use_bias else None
         return bias_act.bias_act(x, b, act=self.activation)
 
@@ -316,6 +317,8 @@ class ToRGB(nn.Module):
 def minibatch_stddev_layer(x, group_size=4, num_new_features=1):
     b, c, h, w = x.shape
     group_size = np.minimum(group_size, b)
+    if b % group_size != 0:
+        group_size = b
     y = x.reshape(group_size, -1, num_new_features, c // num_new_features, h, w).float()
     y = y - y.mean(dim=0, keepdims=True)
     y = torch.sqrt(torch.mean(y**2, dim=0) + 1e-8)
@@ -323,3 +326,114 @@ def minibatch_stddev_layer(x, group_size=4, num_new_features=1):
     y = y.type(x.dtype)
     y = y.repeat(group_size, 1, h, w)
     return torch.cat([x, y], dim=1)
+
+
+def valid_feature_type(feature_type):
+    bool1 = feature_type in ['relu', 'elu+1', 'sqr', 'favor+']
+    bool2 = feature_type.startswith('favor+') and feature_type.split(
+        '_')[1].isdigit()
+    return bool1 or bool2
+
+
+class MultiHeadAttention(nn.Module):
+    """Explicit multihead bidirectional attention."""
+
+    def __init__(self, feature_type, n_heads, in_dim, hidden_dim):
+        assert valid_feature_type(feature_type)
+        super(MultiHeadAttention, self).__init__()
+
+        self._feature_type = feature_type
+        self._n_heads = n_heads
+        self._hidden_dim = hidden_dim
+
+        self.q_map = nn.Conv2d(in_dim, hidden_dim, 1)
+        self.k_map = nn.Conv2d(in_dim, hidden_dim, 1)
+
+    def forward(self, x, y, rfs):
+        assert x.shape == y.shape
+        qs, ks, vs = self._get_queries_keys_values(x, y, rfs)
+        R = torch.einsum('bsij,bsik->bsijk', ks, vs)  # [Batch, Seq, n_heads, feat_dim], [Batch, Seq, n_heads, head_dim]
+        num = torch.einsum('bsijk,bsij->bsik', R, qs)
+
+        s = ks.sum(dim=1, keepdim=True)
+        den = torch.einsum('bsij,bsij->bsi', s, qs)
+
+        outputs = num / (den[Ellipsis, None] + 1e-16)
+        outputs = outputs.reshape(y.shape)
+
+        return outputs
+
+    def _get_queries_keys_values(self, x, y, rfs):
+        # [B, c, h, w] -> [B, hw, n_head, head_dim]
+        b, c, h, w = x.shape
+        queries = self.q_map(x)
+        keys = self.k_map(y)
+        values = y
+
+        queries = queries.permute(0, 2, 3, 1).reshape([b, h * w, self._n_heads, -1])
+        keys = keys.permute(0, 2, 3, 1).reshape([b, h * w, self._n_heads, -1])
+        values = values.permute(0, 2, 3, 1).reshape([b, h * w, self._n_heads, -1])
+
+        if self._feature_type == 'relu':
+            queries = nn.functional.relu(queries)
+            keys = nn.functional.relu(keys)
+        elif self._feature_type == 'elu+1':
+            queries = nn.functional.elu(queries) + 1
+            keys = nn.functional.elu(keys) + 1
+        elif self._feature_type == 'sqr':
+            queries = queries**2
+            keys = keys**2
+        elif self._feature_type == 'abs':
+            queries = torch.abs(queries)
+            keys = torch.abs(keys)
+        else:
+
+            head_dim = self._hidden_dim // self._n_heads
+
+            queries = queries * np.power(head_dim, -0.25)
+            queries = torch.einsum('ijkl,klm->ijkm', queries, rfs) - (queries**2).sum(3, keepdim=True) / 2
+            queries = torch.exp(queries)
+
+            keys = keys * np.power(head_dim, -0.25)
+            keys = torch.einsum('ijkl,klm->ijkm', keys, rfs) - (keys**2).sum(3, keepdim=True) / 2
+            keys = torch.exp(keys)
+
+        return queries, keys, values
+
+    def sample_rfs(self, device):
+
+        if not self._feature_type.startswith('favor+'):
+            return None
+
+        if self._feature_type == 'favor+':
+            factor = 1
+        else:
+            splitted = self._feature_type.split('_')
+            factor = int(splitted[1])
+
+        head_dim = self._hidden_dim // self._n_heads
+
+        rfs = [[
+            _sample_orth_matrix(head_dim, device)[None, Ellipsis] for _ in range(factor)
+        ] for _ in range(self._n_heads)]
+        rfs = [torch.cat(x, 2) for x in rfs]
+        rfs = torch.cat(rfs, 0)
+        rfs = rfs * np.sqrt(head_dim)
+
+        return rfs
+
+
+def _sample_orth_matrix(size, device):
+    """Samples orthogonal matrix to reduce variance for random features."""
+    subspace = torch.randn(size, size, device=device)
+    subspace = torch.tril(subspace)
+    subspace = subspace / torch.sqrt((subspace**2).sum(0, keepdim=True))
+
+    S = torch.triu(subspace.T.mm(subspace)) - 0.5 * torch.eye(
+        subspace.shape[1], device=device)
+
+    result = torch.eye(
+        subspace.shape[0], device=device) - subspace.mm(torch.inverse(S)).mm(
+            subspace.T)
+
+    return result

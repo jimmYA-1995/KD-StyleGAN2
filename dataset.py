@@ -128,6 +128,13 @@ class DeepFashion(data.Dataset):
             'xflip': cfg.DATASET.xflip
         }
 
+    @classmethod
+    def worker_init_fn(cls, worker_id):
+        """ For reproducibility & randomness in multi-worker mode """
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        # worker_info = torch.utils.data.get_worker_info()
+
     def __len__(self):
         return self.num_items
 
@@ -140,14 +147,15 @@ class DeepFashion(data.Dataset):
     def transform(self, img: np.ndarray, normalize=True, channel_first=True) -> torch.Tensor:
         """ normalize, channel first, maybe xflip, to Tensor """
         img = (img.astype(np.float32) - 127.5) / 127.5
-        img = img.transpose(2, 0, 1)
         if self.xflip and self.idx > len(self.fileIDs):
-            img = img[::-1]
+            img = img[:, ::-1, :]
+        if channel_first:
+            img = img.transpose(2, 0, 1)
 
         return torch.from_numpy(img.copy())
 
     def __getitem__(self, idx) -> List[torch.Tensor]:
-        data = []
+        data = {}
         self.idx = idx
         try:
             fileID = self.fileIDs[idx % len(self.fileIDs)] if self.xflip else self.fileIDs[idx]
@@ -157,11 +165,11 @@ class DeepFashion(data.Dataset):
 
         if 'face' in self.targets:
             img = io.imread(self.face_dir / f'{fileID}.png')
-            data.append(self.transform(img))
+            data['face'] = self.transform(img)
 
         if 'human' in self.targets:
             img = io.imread(self.human_dir / f'{fileID}.png')
-            data.append(self.transform(img))
+            data['human'] = self.transform(img)
 
         if 'heatmap' in self.targets or 'vis_kp' in self.targets:
             kp = pickle.load(open(self.kp_dir / f'{fileID}.pkl', 'rb'))[0][:, (1, 0, 2)]  # [K, (y, x, score)]
@@ -169,11 +177,11 @@ class DeepFashion(data.Dataset):
 
         if 'heatmap' in self.targets:
             heatmap = cords_to_map(cords, (self.res, self.res), sigma=8)
-            data.append(self.transform(heatmap, normalize=False))
+            data['heatmap'] = self.transform(heatmap, normalize=False)
 
         if 'vis_kp' in self.targets:
             vis_kp, _ = draw_pose_from_cords(cords.astype(int), (self.res, self.res))
-            data.append(self.transform(vis_kp))
+            data['vis_kp'] = self.transform(vis_kp)
 
         return data
 
@@ -181,4 +189,13 @@ class DeepFashion(data.Dataset):
 if __name__ == "__main__":
     from config import get_cfg_defaults
     cfg = get_cfg_defaults()
-    ds = get_dataset(cfg)
+    ds = get_dataset(cfg, split='train', xflip=False)
+    print(len(ds))
+    ds.update_targets(["face", "human", "heatmap"])
+    loader = torch.utils.data.DataLoader(
+        ds,
+        batch_size=2
+    )
+    data = next(iter(loader))
+    print("finish")
+
