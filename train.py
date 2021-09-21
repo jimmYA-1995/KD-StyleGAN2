@@ -66,11 +66,11 @@ class Trainer():
         self._samples = None
 
         self.g, self.d = create_model(cfg, device=self.device)
-        self.g_ema = copy.deepcopy(self.g).eval()
+        self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
 
         # Define optimizers with Lazy regularizer
-        g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1)
-        d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1)
+        g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1) if cfg.TRAIN.PPL.every != -1 else 1
+        d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
         self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
 
@@ -101,14 +101,17 @@ class Trainer():
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
         elif cfg.MODEL.teacher_weight:
+            assert cfg.TRAIN.PPL.every == -1, ""
             self.log.info(f"resume teacher Net from {cfg.MODEL.teacher_weight}")
             ckpt = torch.load(cfg.MODEL.teacher_weight)['g_ema']
+            self.g.requires_grad_(False)
             resume_teacherNet_from_NV_weights(self.g, ckpt, verbose=debug)
+            self.g.requires_grad_(True)
             resume_teacherNet_from_NV_weights(self.g_ema, ckpt, verbose=debug)
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
-            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=True)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
@@ -321,8 +324,8 @@ class Trainer():
             #     aug = self.augment_pipe(torch.cat(batch, dim=1))
             #     face, human, heatmap = torch.split(aug, channels, dim=1)
 
-            self.Dmain(data, r1_reg=(i % self.cfg.TRAIN.R1.every == 0))
-            self.Gmain(data, pl_reg=(i % self.cfg.TRAIN.PPL.every == 0))
+            self.Dmain(data, r1_reg=(self.cfg.TRAIN.R1.every != -1 and i % self.cfg.TRAIN.R1.every == 0))
+            self.Gmain(data, pl_reg=(self.cfg.TRAIN.PPL.every != -1 and i % self.cfg.TRAIN.PPL.every == 0))
 
             self.ema(ema_beta=ema_beta)
             self.reduce_stats()
@@ -342,7 +345,7 @@ class Trainer():
 
     def Dmain(self, data, r1_reg=False):
         """ GAN loss & (opt.)R1 regularization """
-        self.g.requires_grad_with_freeze_(False)
+        self.g.requires_grad_(False)
         self.d.requires_grad_(True)
 
         loss_Dmain = loss_Dr1 = 0
@@ -385,7 +388,7 @@ class Trainer():
         self.d_scaler.update()
 
     def Gmain(self, data, pl_reg=False):
-        self.g.requires_grad_with_freeze_(True)
+        self.g_.requires_grad_with_freeze_(True)
         self.d.requires_grad_(False)
 
         z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
