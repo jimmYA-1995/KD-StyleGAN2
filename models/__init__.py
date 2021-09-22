@@ -1,7 +1,7 @@
 from .networks import Generator, Discriminator
 
 
-__all__ = ['Generator', 'Discriminator', 'create_model', 'resume_teachNet_from_NV_weights']
+__all__ = ['Generator', 'Discriminator', 'create_model', 'resume_teacherNet_from_NV_weights']
 
 
 def create_model(cfg, device=None, eval_only=False):
