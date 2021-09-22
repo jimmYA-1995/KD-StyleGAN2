@@ -46,6 +46,17 @@ _C.MODEL.SYNTHESIS.pose_encoder_kwargs.name = 'DefaultPoseEncoder'
 _C.MODEL.SYNTHESIS.channel_base = 32768
 _C.MODEL.SYNTHESIS.channel_max = 512
 
+_C.MODEL.DISCRIMINATOR = CN()
+_C.MODEL.DISCRIMINATOR.img_channels = 3
+_C.MODEL.DISCRIMINATOR.branch_res = 64
+_C.MODEL.DISCRIMINATOR.top_res = 4
+_C.MODEL.DISCRIMINATOR.channel_base = 32768
+_C.MODEL.DISCRIMINATOR.channel_max = 512
+_C.MODEL.DISCRIMINATOR.cmap_dim = 512
+_C.MODEL.DISCRIMINATOR.mbstd_group_size = 4
+_C.MODEL.DISCRIMINATOR.mbstd_num_features = 1
+_C.MODEL.DISCRIMINATOR.resample_filter = [1, 3, 3, 1]
+
 # ----- training ------
 _C.TRAIN = CN()
 _C.TRAIN.iteration = 80000

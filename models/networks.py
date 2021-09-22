@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import Parameter
 from typing import List, Dict
 
 from .blocks import DBlock
@@ -10,7 +9,7 @@ from .utils import (
     normalize_2nd_moment,
     build_pose_encoder,
 )
-
+from torch_utils.misc import assert_shape
 
 class MappingNetwork(nn.Module):
     def __init__(
@@ -245,54 +244,85 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
+    """ Discriminator with 2 branch on high resolution and merge on `branch_res` """
     def __init__(
         self,
-        num_classes: int,
         img_resolution: int,
-        img_channels: int = 3,
+        img_channels: int = 3,                     # img_channel for each class
+        branch_res: int = 64,                      # separate classes until res
         top_res: int = 4,
         channel_base: int = 32768,
         channel_max: int = 512,
+        cmap_dim: int = None,                      # Dimensionality of mapped conditioning label, None = default.
         mbstd_group_size: int = 4,
         mbstd_num_features: int = 1,
         resample_filter: List[int] = [1, 3, 3, 1],
     ):
-        assert top_res < img_resolution
-        assert isinstance(num_classes, int) and num_classes >= 1
+        assert top_res < branch_res <= img_resolution
         super(Discriminator, self).__init__()
-        self.num_classes = num_classes
+        self.num_classes = 2  # fix num_class to 2
         mbstd_num_channels = 1
+        self.input_shape = [img_channels * self.num_classes, img_resolution, img_resolution]
         self.img_channels = img_channels
+        self.branch_res = branch_res
+        self.top_res = top_res
         self.mbstd_group_size = mbstd_group_size
         self.mbstd_num_features = mbstd_num_features
         self.resolution_log2 = int(np.log2(img_resolution))
         self.block_resolutions = [2 ** i for i in range(self.resolution_log2, int(np.log2(top_res)), -1)]
         channel_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [top_res]}
 
-        self.frgb = Conv2dLayer(self.img_channels, channel_dict[img_resolution], kernel_size=1)
+        self.frgb_face = Conv2dLayer(self.img_channels, channel_dict[img_resolution], kernel_size=1)
+        self.frgb_human = Conv2dLayer(self.img_channels, channel_dict[img_resolution], kernel_size=1)
         self.blocks = nn.ModuleList()
         for res in self.block_resolutions:
-            self.add_module(f'b{res}', DBlock(channel_dict[res], channel_dict[res // 2], resample_filter=resample_filter))
+            if res == branch_res:
+                merge_layer = Conv2dLayer(
+                    channel_dict[res] * 2,
+                    channel_dict[res],
+                    kernel_size=1,
+                    use_bias=False,
+                    activation='lrelu',
+                    resample_filter=resample_filter
+                )
+                self.add_module(f'b{res}_merge', merge_layer)
+
+            if res > branch_res:
+                self.add_module(f'b{res}_face', DBlock(channel_dict[res], channel_dict[res // 2]))
+                self.add_module(f'b{res}_human', DBlock(channel_dict[res], channel_dict[res // 2]))
+            else:
+                self.add_module(f'b{res}', DBlock(channel_dict[res], channel_dict[res // 2]))
 
         # output layer
+        # if self.num_classes > 1:
+        #     self.mapping = MappingNetwork(0, cmap_dim, self.num_classes,)
         self.conv_out = Conv2dLayer(channel_dict[top_res] + mbstd_num_channels, channel_dict[top_res], activation='lrelu')
-        self.dense_out = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
-        self.label_out = DenseLayer(channel_dict[top_res], num_classes)
+        self.fc = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
+        # self.condition_head = DenseLayer(channel_dict[top_res], self.num_classes)
+        self.joint_head = DenseLayer(channel_dict[top_res], 1)
 
-    def forward(self, img, c=None):
-        assert img.shape[1] == self.img_channels, f"(D) channel unmatched. {img.shape[1]} v.s. {self.img_channels}"
-
-        x = self.frgb(img)
+    def forward(self, img):
+        assert_shape(img, [None, *self.input_shape])
+        face, human = torch.chunk(img, 2, dim=1)
+        cs = torch.eye(self.num_classes, device=face.device).unsqueeze(1).repeat(1, face.shape[0], 1).flatten(0, 1)  # [B * #class, c_dim]
+        face = self.frgb_face(face)
+        human = self.frgb_human(human)
+        x = None
         for res in self.block_resolutions:
-            x = getattr(self, f'b{res}')(x)
+            if res == self.branch_res:
+                x = getattr(self, f'b{res}_merge')(torch.cat([face, human], dim=1))
 
-        # TODO FRGB if skip
+            if res > self.branch_res:
+                face = getattr(self, f'b{res}_face')(face)
+                human = getattr(self, f'b{res}_human')(human)
+            else:
+                assert x is not None
+                x = getattr(self, f'b{res}')(x)
+
+        # Top res : 4x4
         x = minibatch_stddev_layer(x, self.mbstd_group_size, self.mbstd_num_features)
         x = self.conv_out(x)
-        x = x.view(x.shape[0], -1)
-        x = self.dense_out(x)
-        out = self.label_out(x)
-        if c is not None:
-            out = torch.mean(out * c, dim=1, keepdims=True)
+        x = self.fc(x.flatten(1))
+        joint_out = self.joint_head(x)
 
-        return out
+        return joint_out

@@ -30,9 +30,9 @@ DATASET:
 MODEL:
   z_dim: 512
   w_dim: 512
-  mode: 'split'
+  mode: 'joint'
   freeze_teacher: false
-  teacher_weight: 'NV-face-weight.pt'
+  teacher_weight: ''
   attn_res: 64
 
   MAPPING:
@@ -50,6 +50,13 @@ MODEL:
       max_channels: 512
       heatmap_size: 256
       in_channels: 17
+
+  DISCRIMINATOR:
+    img_channels: 3
+    branch_res: 256
+    top_res: 4
+    channel_base: 16384
+
 
 TRAIN:
   iteration: 10

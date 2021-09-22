@@ -1,4 +1,4 @@
-from .networks import Generator, Discriminator
+from .networks import *
 
 
 __all__ = ['Generator', 'Discriminator', 'create_model', 'resume_teacherNet_from_NV_weights']
@@ -15,12 +15,12 @@ def create_model(cfg, device=None, eval_only=False):
         attn_res=cfg.MODEL.attn_res,
         mapping_kwargs=cfg.MODEL.MAPPING,
         synthesis_kwargs=dict(cfg.MODEL.SYNTHESIS),
-    ).to(device).requires_grad_(False)
+    ).to(device)
 
     if eval_only:
         return g.eval()
 
-    d = Discriminator(1, cfg.resolution, img_channels=6).to(device).requires_grad_(False)
+    d = Discriminator(cfg.resolution, **cfg.MODEL.DISCRIMINATOR).to(device)
     return g, d
 
 

@@ -66,7 +66,7 @@ class Trainer():
         self._samples = None
 
         self.g, self.d = create_model(cfg, device=self.device)
-        self.g_ema = copy.deepcopy(self.g).eval()
+        self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
 
         # Define optimizers with Lazy regularizer
         g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1) if cfg.TRAIN.PPL.every != -1 else 1
@@ -79,9 +79,8 @@ class Trainer():
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
             c = torch.empty([self.batch_gpu, self.d.num_classes], device=self.device)
             heatmaps = torch.empty([self.batch_gpu, *self.g.heatmap_shape], device=self.device)
-            _ = print_module_summary(self.g, [z, heatmaps])
-            imgs = torch.empty([self.batch_gpu, 6, self.cfg.resolution, self.cfg.resolution], device=self.device)
-            print_module_summary(self.d, [imgs, c])
+            imgs, *_ = print_module_summary(self.g, [z, heatmaps])
+            print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
 
         # if cfg.ADA.enabled:
         #     self.augment_pipe = AugmentPipe(**cfg.ADA.KWARGS).train().requires_grad_(False).to(self.device)
@@ -111,7 +110,7 @@ class Trainer():
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
-            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=True)
+            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
@@ -345,7 +344,7 @@ class Trainer():
 
     def Dmain(self, data, r1_reg=False):
         """ GAN loss & (opt.)R1 regularization """
-        self.g.requires_grad_with_freeze_(False)
+        self.g.requires_grad_(False)
         self.d.requires_grad_(True)
 
         loss_Dmain = loss_Dr1 = 0
