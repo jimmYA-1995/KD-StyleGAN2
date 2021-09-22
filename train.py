@@ -394,19 +394,13 @@ class Trainer():
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            fake_imgs, feats = self.g(z, data['heatmap'])
+            fake_imgs, _ = self.g(z, data['heatmap'])
 
             fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
             fake_pred = self.d(fake)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
             loss_Gmain = loss_Gmain + gan_loss
-
-            # attention feature reconstruction loss
-            for res in feats['face'].keys():
-                rec_loss = torch.nn.functional.l1_loss(feats['atten'][res], feats['face'][res].detach())
-                self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
-                loss_Gmain = loss_Gmain + rec_loss
 
         # self.g.zero_grad(set_to_none=True)
         # self.g_scaler.scale(loss_Gmain).backward()
