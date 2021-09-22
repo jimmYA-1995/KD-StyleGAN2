@@ -111,12 +111,12 @@ class HeatmapSplitsEncoder(nn.Module):
 
 
 class DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, resample_filter=[1, 3, 3, 1], **kwargs):
+    def __init__(self, in_channels, out_channels, activation='lrelu', resample_filter=[1, 3, 3, 1]):
         super(DBlock, self).__init__()
         self.skip = Conv2dLayer(in_channels, out_channels, kernel_size=1, use_bias=False)
 
-        self.conv = Conv2dLayer(in_channels, in_channels, resample_filter=resample_filter)
-        self.conv_down = Conv2dLayer(in_channels, out_channels, mode='down', resample_filter=resample_filter, **kwargs)
+        self.conv = Conv2dLayer(in_channels, in_channels, activation=activation, resample_filter=resample_filter)
+        self.conv_down = Conv2dLayer(in_channels, out_channels, mode='down', activation=activation, resample_filter=resample_filter)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter(resample_filter))
 
     def forward(self, x):
