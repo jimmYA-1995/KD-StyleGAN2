@@ -71,6 +71,7 @@ class Trainer():
         # Define optimizers with Lazy regularizer
         g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1) if cfg.TRAIN.PPL.every != -1 else 1
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
+        self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
 
         # Print network summary tables.
@@ -81,19 +82,31 @@ class Trainer():
             imgs, *_ = print_module_summary(self.g, [z, heatmaps])
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
 
+        # if cfg.ADA.enabled:
+        #     self.augment_pipe = AugmentPipe(**cfg.ADA.KWARGS).train().requires_grad_(False).to(self.device)
+        #     if 'ada_p' not in self.stats:
+        #         self.stats['ada_p'] = torch.as_tensor(cfg.ADA.p, device=self.device)
+        #     self.augment_pipe.p.copy_(self.stats['ada_p'])
+        #     if cfg.ADA.target > 0:
+        #         self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
+        #         self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
+
+        # if 'fid' in self.metrics:
+        #     self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
+
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
-        self.ckpt_required_keys = ["d", "d_optim", "stats"]
-        assert cfg.TRAIN.CKPT.path, "handcrafted code! add extra para while resuming from partial weights"
-        ckpt = self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
-
-        _ = self.g_ema.load_state_dict(ckpt['g_ema'], strict=False)
-        result = self.g.load_state_dict(ckpt['g'], strict=False)
-        orig_paras = [p[1] for p in self.g.named_parameters() if p[0] not in result.missing_keys]
-        new_paras = [p[1] for p in self.g.named_parameters() if p[0] in result.missing_keys]
-        self.g_optim = torch.optim.Adam(orig_paras, lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
-        self.g_optim.load_state_dict(ckpt['g_optim'])
-        self.g_optim.add_param_group({'params': new_paras, 'lr': 5e-3})  # bigger lr for new params
+        self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
+        if cfg.TRAIN.CKPT.path:
+            self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
+        elif cfg.MODEL.teacher_weight:
+            assert cfg.TRAIN.PPL.every == -1, ""
+            self.log.info(f"resume teacher Net from {cfg.MODEL.teacher_weight}")
+            ckpt = torch.load(cfg.MODEL.teacher_weight)['g_ema']
+            self.g.requires_grad_(False)
+            resume_teacherNet_from_NV_weights(self.g, ckpt, verbose=debug)
+            self.g.requires_grad_(True)
+            resume_teacherNet_from_NV_weights(self.g_ema, ckpt, verbose=debug)
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
@@ -248,7 +261,7 @@ class Trainer():
 
         for key, value in ckpt.items():
             if key not in self.ckpt_required_keys:
-                self.log.warning(f"Unexpected key: {key}")
+                self.log.warning(f"Missed key: {key}")
                 continue
 
             obj = getattr(self, key, None)
@@ -260,8 +273,6 @@ class Trainer():
                 self.stats.update(value)
             else:
                 obj.load_state_dict(value)
-
-        return ckpt
 
     @master_only
     def save_to_checkpoint(self, i):
