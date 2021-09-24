@@ -96,10 +96,12 @@ class Trainer():
 
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
+        find_unused = False
         self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
         elif cfg.MODEL.teacher_weight:
+            find_unused = True
             assert cfg.TRAIN.PPL.every == -1, ""
             self.log.info(f"resume teacher Net from {cfg.MODEL.teacher_weight}")
             ckpt = torch.load(cfg.MODEL.teacher_weight)['g_ema']
@@ -110,7 +112,7 @@ class Trainer():
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
-            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=find_unused)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
