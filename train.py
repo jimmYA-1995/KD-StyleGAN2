@@ -224,7 +224,8 @@ class Trainer():
 
     def sample_forever(self, loader, pbar=False):
         """ Inifinite loader with optional progress bar. """
-        self.epoch = self.start_iter * self.batch_gpu // len(loader.dataset)
+        # epoch value may incorrect if we resume training with different num_gpus to previous run.
+        self.epoch = self.start_iter * self.batch_gpu * self.num_gpus // len(loader.dataset)
         while True:
             if self.num_gpus > 1:
                 loader.sampler.set_epoch(self.epoch)

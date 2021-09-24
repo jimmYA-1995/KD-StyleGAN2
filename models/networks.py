@@ -11,6 +11,7 @@ from .utils import (
 )
 from torch_utils.misc import assert_shape
 
+
 class MappingNetwork(nn.Module):
     def __init__(
         self,
