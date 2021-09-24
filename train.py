@@ -404,7 +404,7 @@ class Trainer():
 
             # attention feature reconstruction loss
             for res in feats['face'].keys():
-                rec_loss = torch.nn.functional.l1_loss(feats['atten'][res], feats['face'][res].detach())
+                rec_loss = torch.nn.functional.l1_loss(feats['atten'][res], feats['query'][res].detach())
                 self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
                 loss_Gmain = loss_Gmain + rec_loss
 

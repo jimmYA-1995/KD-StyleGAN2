@@ -350,29 +350,27 @@ class MultiHeadAttention(nn.Module):
         self.k_map = nn.Conv2d(in_dim, hidden_dim, 1)
 
     def forward(self, x, y, rfs):
-        assert x.shape == y.shape
         qs, ks, vs = self._get_queries_keys_values(x, y, rfs)
         R = torch.einsum('bsij,bsik->bsijk', ks, vs)  # [Batch, Seq, n_heads, feat_dim], [Batch, Seq, n_heads, head_dim]
-        num = torch.einsum('bsijk,bsij->bsik', R, qs)
+        num = torch.einsum('bSijk,bsij->bsik', R, qs)
 
         s = ks.sum(dim=1, keepdim=True)
         den = torch.einsum('bsij,bsij->bsi', s, qs)
 
         outputs = num / (den[Ellipsis, None] + 1e-16)
-        outputs = outputs.reshape(y.shape)
+        outputs = outputs.reshape(x.shape)
 
         return outputs
 
     def _get_queries_keys_values(self, x, y, rfs):
-        # [B, c, h, w] -> [B, hw, n_head, head_dim]
-        b, c, h, w = x.shape
         queries = self.q_map(x)
-        keys = self.k_map(y)
-        values = y
+        queries = queries.permute(0, 2, 3, 1).reshape([x.shape[0], x.shape[2] * x.shape[3], self._n_heads, -1])
 
-        queries = queries.permute(0, 2, 3, 1).reshape([b, h * w, self._n_heads, -1])
-        keys = keys.permute(0, 2, 3, 1).reshape([b, h * w, self._n_heads, -1])
-        values = values.permute(0, 2, 3, 1).reshape([b, h * w, self._n_heads, -1])
+        keys = self.k_map(y)
+        keys = keys.permute(0, 2, 3, 1).reshape([y.shape[0], y.shape[2] * y.shape[3], self._n_heads, -1])
+
+        values = y
+        values = values.permute(0, 2, 3, 1).reshape([y.shape[0], y.shape[2] * y.shape[3], self._n_heads, -1])
 
         if self._feature_type == 'relu':
             queries = nn.functional.relu(queries)

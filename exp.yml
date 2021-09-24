@@ -2,7 +2,7 @@
 name: 'FaceHuman-KD-attention'
 description: >
     Default configuration for synthesis of face & human.
-    Core method: Knowledge Distillation + Attention feature matching + infoNCE
+    Apply maxpooling to face features(query)
 n_sample: 64
 resolution: 256
 classes:
@@ -33,7 +33,7 @@ MODEL:
   mode: 'joint'
   freeze_teacher: false
   teacher_weight: ''
-  attn_res: 64
+  attn_res: 256
 
   MAPPING:
     num_layers: 8
