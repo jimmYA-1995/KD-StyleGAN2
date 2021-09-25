@@ -22,7 +22,7 @@ from dataset import get_dataset
 from losses import *
 from misc import *
 from models import *
-from torch_utils.misc import print_module_summary
+from torch_utils.misc import print_module_summary, constant
 
 
 OUTDIR_MAX_LEN = 1024
@@ -82,15 +82,6 @@ class Trainer():
             imgs, *_ = print_module_summary(self.g, [z, heatmaps])
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
 
-        # if cfg.ADA.enabled:
-        #     self.augment_pipe = AugmentPipe(**cfg.ADA.KWARGS).train().requires_grad_(False).to(self.device)
-        #     if 'ada_p' not in self.stats:
-        #         self.stats['ada_p'] = torch.as_tensor(cfg.ADA.p, device=self.device)
-        #     self.augment_pipe.p.copy_(self.stats['ada_p'])
-        #     if cfg.ADA.target > 0:
-        #         self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
-        #         self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
-
         # if 'fid' in self.metrics:
         #     self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
 
@@ -109,6 +100,16 @@ class Trainer():
             resume_teacherNet_from_NV_weights(self.g, ckpt, verbose=debug)
             self.g.requires_grad_(True)
             resume_teacherNet_from_NV_weights(self.g_ema, ckpt, verbose=debug)
+
+        if cfg.ADA.enabled:
+            self.log.info("build Augment Pipe")
+            self.augment_pipe = AugmentPipe(**cfg.ADA.KWARGS).train().requires_grad_(False).to(self.device)
+            if 'ada_p' not in self.stats:
+                self.stats['ada_p'] = torch.as_tensor(cfg.ADA.p, device=self.device)
+            self.augment_pipe.p.copy_(self.stats['ada_p'])
+            if cfg.ADA.target > 0:
+                self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
+                self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
@@ -321,10 +322,6 @@ class Trainer():
 
         for i in range(self.start_iter, self.cfg.TRAIN.iteration):
             data = next(loader)
-            # if self.cfg.ADA.enabled:
-            #     channels = [x.shape[1] for x in batch]
-            #     aug = self.augment_pipe(torch.cat(batch, dim=1))
-            #     face, human, heatmap = torch.split(aug, channels, dim=1)
 
             self.Dmain(data, r1_reg=(self.cfg.TRAIN.R1.every != -1 and i % self.cfg.TRAIN.R1.every == 0))
             self.Gmain(data, pl_reg=(self.cfg.TRAIN.PPL.every != -1 and i % self.cfg.TRAIN.PPL.every == 0))
@@ -333,6 +330,8 @@ class Trainer():
             self.reduce_stats()
 
             # FID
+            if self.cfg.ADA.enabled and self.cfg.ADA.target > 0 and (i % self.cfg.ADA.interval == 0):
+                self.update_ada()
 
             if (i + 1) % self.cfg.TRAIN.CKPT.every == 0:
                 self.save_to_checkpoint(i + 1)
@@ -351,25 +350,30 @@ class Trainer():
         self.d.requires_grad_(True)
 
         loss_Dmain = loss_Dr1 = 0
+        if self.cfg.ADA.enabled:
+            data['face'] = self.augment_pipe(data['face'])
         real = torch.cat([data['face'], data['human']], dim=1).detach().requires_grad_(r1_reg)
         z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
-            fake_img, _ = self.g(z, data['heatmap'], on_forward=True)
-            fake = torch.cat([fake_img['face'], fake_img['human']], dim=1)
-            # fake_img = self.augment_pipe(fake_img) if self.cfg.ADA.enabled else fake_img
+            fake_imgs, _ = self.g(z, data['heatmap'], on_forward=True)
+            if self.cfg.ADA.enabled:
+                fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
+            fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
 
             real_pred = self.d(real)
             fake_pred = self.d(fake)
             real_loss = torch.nn.functional.softplus(-real_pred).mean()
-            self.stats[f"loss/D-Real"] = real_loss.detach()
             fake_loss = torch.nn.functional.softplus(fake_pred).mean()
+            self.stats[f"D-Real-Score"] = real_pred.mean().detach()
+            self.stats[f"D-Fake-Score"] = fake_pred.mean().detach()
+            self.stats[f"loss/D-Real"] = real_loss.detach()
             self.stats[f"loss/D-Fake"] = fake_loss.detach()
 
             loss_Dmain = loss_Dmain + real_loss + fake_loss
 
-            # if self.cfg.ADA.enabled and self.cfg.ADA.target > 0:
-            #     self.ada_moments[0].add_(torch.ones_like(real_pred).sum())
-            #     self.ada_moments[1].add_(real_pred.sign().detach().flatten().sum())
+            if self.cfg.ADA.enabled and self.cfg.ADA.target > 0:
+                self.ada_moments[0].add_(torch.ones_like(real_pred).sum())
+                self.ada_moments[1].add_(real_pred.sign().detach().flatten().sum())
 
             if r1_reg:
                 r1 = r1_loss(real_pred, real)
@@ -398,7 +402,9 @@ class Trainer():
         with autocast(enabled=self.autocast):
             # GAN loss
             fake_imgs, feats = self.g(z, data['heatmap'])
-
+            
+            if self.cfg.ADA.enabled:
+                fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
             fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
             fake_pred = self.d(fake)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
@@ -450,6 +456,17 @@ class Trainer():
     def ema(self, ema_beta=0.99):
         for p_ema, p in zip(self.g_ema.parameters(), self.g_.parameters()):
             p_ema.copy_(p.lerp(p_ema, ema_beta))
+
+    def update_ada(self):
+        cfg = self.cfg.ADA
+        if self.num_gpus > 1:
+            torch.distributed.all_reduce(self.ada_moments)
+
+        ada_sign = (self.ada_moments[1] / self.ada_moments[0]).cpu().numpy()
+        adjust = np.sign(ada_sign - cfg.target) * (self.batch_gpu * self.num_gpus * cfg.interval) / (cfg.kimg * 1000)
+        self.augment_pipe.p.copy_((self.augment_pipe.p + adjust).max(constant(0, device=self.device)))
+        self.stats['ada_p'] = self.augment_pipe.p
+        self.ada_moments.zero_()
 
     def sampling(self, i):
         """ inference & save sample images """
