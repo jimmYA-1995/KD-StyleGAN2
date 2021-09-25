@@ -338,7 +338,7 @@ def valid_feature_type(feature_type):
 class MultiHeadAttention(nn.Module):
     """Explicit multihead bidirectional attention."""
 
-    def __init__(self, feature_type, n_heads, in_dim, hidden_dim):
+    def __init__(self, in_dim, hidden_dim, feature_type='relu', n_heads=1):
         assert valid_feature_type(feature_type)
         super(MultiHeadAttention, self).__init__()
 
@@ -349,7 +349,8 @@ class MultiHeadAttention(nn.Module):
         self.q_map = nn.Conv2d(in_dim, hidden_dim, 1)
         self.k_map = nn.Conv2d(in_dim, hidden_dim, 1)
 
-    def forward(self, x, y, rfs):
+    def forward(self, x, y):
+        rfs = self.sample_rfs(x.device)
         qs, ks, vs = self._get_queries_keys_values(x, y, rfs)
         R = torch.einsum('bsij,bsik->bsijk', ks, vs)  # [Batch, Seq, n_heads, feat_dim], [Batch, Seq, n_heads, head_dim]
         num = torch.einsum('bSijk,bsij->bsik', R, qs)
@@ -385,7 +386,7 @@ class MultiHeadAttention(nn.Module):
             queries = torch.abs(queries)
             keys = torch.abs(keys)
         else:
-
+            # favor+
             head_dim = self._hidden_dim // self._n_heads
 
             queries = queries * np.power(head_dim, -0.25)

@@ -10,7 +10,7 @@ classes:
 - 'human'
 
 ADA:
-  enabled: false
+  enabled: true
   target: 0.6  # set 0 to fix prob.
   p: 0.0
   interval: 4
