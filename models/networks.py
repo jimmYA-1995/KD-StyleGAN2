@@ -164,7 +164,6 @@ class Generator(nn.Module):
         self.img_resolution = img_resolution
         self.mode = mode
         self.freeze_teacher = freeze_teacher
-        self.attn_res = attn_res
 
         self.num_layers = int(np.log2(img_resolution)) * 2 - 2
 
@@ -193,8 +192,9 @@ class Generator(nn.Module):
         for res in self.block_resolutions:
             if res > attn_res:
                 break
+
             in_channels = self.channel_dict[res]
-            self.add_module(f'{res}_atten', MultiHeadAttention('relu', 4, in_channels, in_channels // 8))  # TODO support FAVOR+
+            self.add_module(f'{res}_atten', MultiHeadAttention(in_channels, in_channels // 8, 'relu', 4))  # TODO support FAVOR+
 
     def forward(self, z, pose, return_dlatent=False, on_forward=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
         # TODO enable style mixing training
@@ -218,9 +218,11 @@ class Generator(nn.Module):
         if not on_forward:
             # attention
             ref_c, c = self.classes
-            feats['atten'] = {}
+            feats['atten'], feats['query'] = {}, {}
             for res in feats[ref_c].keys():
-                feats['atten'][res] = getattr(self, f'{res}_atten')(feats[ref_c][res], feats[c][res], None)  # TODO support FAVOR+
+                query = F.max_pool2d(feats[ref_c][res], kernel_size=4) if int(res) >= 16 else feats[ref_c][res]
+                feats['query'][res] = query
+                feats['atten'][res] = getattr(self, f'{res}_atten')(feats['query'][res], feats[c][res])  # TODO support FAVOR+
 
         if return_dlatent:
             return img, feats, ws
