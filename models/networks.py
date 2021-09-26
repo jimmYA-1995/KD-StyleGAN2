@@ -79,7 +79,6 @@ class SynthesisNetwork(nn.Module):
         pose: bool = False,                # Whether to build Pose Encoder
         const: bool = False,               # Whether to create const inputs
         pose_encoder_kwargs: dict = {},    # Kwargs for Pose Encoder when using pose encoder
-        return_feat_res: int = 64,         # the max resolution of features to return
         channel_base: int = 32768,         # Overall multiplier for the number of channels.
         channel_max: int = 512,            # Maximum number of channels in any layer.
         resample_filter=[1, 3, 3, 1],      # Low-pass filter to apply when resampling activations. None = no filtering.
@@ -93,7 +92,6 @@ class SynthesisNetwork(nn.Module):
         self.img_channels = img_channels
         self.bottom_res = bottom_res
         self.pose = pose
-        self.return_feat_res = return_feat_res
         self.num_blocks = int(np.log2(img_resolution // bottom_res)) + 1
         self.block_resolutions = [bottom_res * 2 ** i for i in range(self.num_blocks)]
         self.channel_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
@@ -114,7 +112,8 @@ class SynthesisNetwork(nn.Module):
             self.add_module(f'b{res}_conv', SynthesisLayer(out_channels, out_channels, w_dim, res, resample_filter=resample_filter))
             self.add_module(f'b{res}_trgb', ToRGB(out_channels, img_channels, w_dim, resample_filter=resample_filter))
 
-    def forward(self, ws, pose=None, on_forward=False, **layer_kwargs):
+    def forward(self, ws, pose=None, return_feat_res=None, **layer_kwargs):
+        assert return_feat_res is None or isinstance(return_feat_res, list)
         if pose is not None:
             assert self.pose
             assert pose.shape[0] == ws.shape[0], f"{pose.shape[0]} v.s {ws.shape[0]}"
@@ -131,7 +130,7 @@ class SynthesisNetwork(nn.Module):
                 x = getattr(self, f'b{res}_convUp')(x, ws[:, res_log2 * 2 - 5], **layer_kwargs)
 
             x = getattr(self, f'b{res}_conv')(x, ws[:, res_log2 * 2 - 4], **layer_kwargs)
-            if res <= self.return_feat_res and not on_forward:
+            if return_feat_res is not None and res in return_feat_res:
                 feats[res] = x
 
             img = getattr(self, f'b{res}_trgb')(x, ws[:, res_log2 * 2 - 3], skip=img)
@@ -148,7 +147,6 @@ class Generator(nn.Module):
         img_resolution: int,               # Output resolution.
         mode: str = 'split',               # split teacher & student
         freeze_teacher: bool = False,      # whether to freeze teacher network
-        attn_res: int = 64,                # the max resolution applied by attention
         mapping_kwargs: dict = {},         # Arguments for MappingNetwork.
         synthesis_kwargs: dict = {},       # Arguments for SynthesisNetwork.
     ):
@@ -169,7 +167,7 @@ class Generator(nn.Module):
 
         mapping_args = (z_dim, w_dim)
         synthesis_args = (w_dim, img_resolution)
-        synthesis_kwargs['return_feat_res'] = attn_res
+
         if mode == 'joint':
             synthesis1 = SynthesisNetwork(*synthesis_args, pose=True, const=True, **synthesis_kwargs)
             self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
@@ -189,14 +187,8 @@ class Generator(nn.Module):
         self.img_channels = synthesis1.img_channels
         self.block_resolutions = synthesis1.block_resolutions
         self.channel_dict = synthesis1.channel_dict
-        for res in self.block_resolutions:
-            if res > attn_res:
-                break
 
-            in_channels = self.channel_dict[res]
-            self.add_module(f'{res}_atten', MultiHeadAttention(in_channels, in_channels // 8, 'relu', 4))  # TODO support FAVOR+
-
-    def forward(self, z, pose, return_dlatent=False, on_forward=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
+    def forward(self, z, pose, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
         # TODO enable style mixing training
         assert z.shape[1] == self.z_dim
         z = normalize_2nd_moment(z.to(torch.float32))
@@ -213,16 +205,7 @@ class Generator(nn.Module):
 
         img, feats = {}, {}
         for class_name, synthesis, p in zip(self.classes, self.synthesis.values(), (None, pose)):
-            img[class_name], feats[class_name] = synthesis(ws[class_name], pose=p, on_forward=on_forward, **synthesis_kwargs)
-
-        if not on_forward:
-            # attention
-            ref_c, c = self.classes
-            feats['atten'], feats['query'] = {}, {}
-            for res in feats[ref_c].keys():
-                query = F.max_pool2d(feats[ref_c][res], kernel_size=4) if int(res) >= 16 else feats[ref_c][res]
-                feats['query'][res] = query
-                feats['atten'][res] = getattr(self, f'{res}_atten')(feats['query'][res], feats[c][res])  # TODO support FAVOR+
+            img[class_name], feats[class_name] = synthesis(ws[class_name], pose=p, **synthesis_kwargs)
 
         if return_dlatent:
             return img, feats, ws
@@ -244,6 +227,40 @@ class Generator(nn.Module):
                 para.requires_grad_(False)
             else:
                 para.requires_grad_(requires_grad)
+
+
+class AttentionNetwork(nn.Module):
+    def __init__(
+        self,
+        classes: List,                 # Class name for teacher & student
+        channel_dict: Dict[int, int],  # mapping from resolution to in_channels
+        down: int = 1,
+        ref_shrink: int = 1,
+        feature_types: str = 'relu',
+        n_heads: int = 4,
+    ) -> nn.Module:
+        assert len(classes) == 2
+        super(AttentionNetwork, self).__init__()
+        self.classes = classes
+        self.resolutions = list(channel_dict.keys())
+        self.channel_dict = channel_dict
+        self.ref_shrink = ref_shrink
+
+        for res, in_channels in channel_dict.items():
+            self.add_module(f'{res}_atten', MultiHeadAttention(in_channels, max(1, in_channels // down), feature_types, n_heads))
+
+    def forward(self, feat_dict: Dict[int, torch.Tensor]) -> Dict[int, torch.Tensor]:
+        ref, feat = [feat_dict[c] for c in self.classes]
+        out_feats = {}
+        query_feats = {}
+        for res in self.channel_dict.keys():
+            query_feats[res] = ref[res]
+            if self.ref_shrink > 1 and res // self.ref_shrink >= 4:
+                query_feats[res] = F.max_pool2d(query_feats[res], kernel_size=self.ref_shrink)
+
+            out_feats[res] = getattr(self, f'{res}_atten')(query_feats[res], feat[res])
+
+        return query_feats, out_feats
 
 
 class Discriminator(nn.Module):
