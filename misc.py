@@ -7,7 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
+import scipy.ndimage
+from PIL import Image
 from skimage.draw import circle, line_aa
 
 
@@ -141,6 +144,50 @@ def draw_pose_from_cords(pose_joints, img_size, radius=2, draw_joints=True):
         mask[yy, xx] = True
 
     return colors, mask
+
+
+def ffhq_alignment(
+    lm,
+    output_size=1024,
+    ratio=2.0,
+):
+
+    # Parse landmarks.
+    # pylint: disable=unused-variable
+    lm_chin = lm[0:17]  # left-right
+    lm_eyebrow_left = lm[17:22]  # left-right
+    lm_eyebrow_right = lm[22:27]  # left-right
+    lm_nose = lm[27:31]  # top-down
+    lm_nostrils = lm[31:36]  # top-down
+    lm_eye_left = lm[36:42]  # left-clockwise
+    lm_eye_right = lm[42:48]  # left-clockwise
+    lm_mouth_outer = lm[48:60]  # left-clockwise
+    lm_mouth_inner = lm[60:68]  # left-clockwise
+
+    # Calculate auxiliary vectors.
+    eye_left = np.mean(lm_eye_left, axis=0)
+    eye_right = np.mean(lm_eye_right, axis=0)
+    eye_avg = (eye_left + eye_right) * 0.5
+    eye_to_eye = eye_right - eye_left
+    mouth_left = lm_mouth_outer[0]
+    mouth_right = lm_mouth_outer[6]
+    mouth_avg = (mouth_left + mouth_right) * 0.5
+    eye_to_mouth = mouth_avg - eye_avg
+
+    # Choose oriented crop rectangle.
+    x = eye_to_eye - np.flipud(eye_to_mouth) * [-1, 1]
+    x /= np.hypot(*x)
+
+    x *= max(np.hypot(*eye_to_eye) * ratio, np.hypot(*eye_to_mouth) * ratio * 0.9)
+    y = np.flipud(x) * [-1, 1]
+    c = eye_avg + eye_to_mouth * 0.1
+    quad = np.stack([c - x - y, c - x + y, c + x + y, c + x - y]).astype(int)
+
+    # 
+    mask = np.zeros((output_size, output_size), np.float32)
+    cv2.fillConvexPoly(mask, quad, 1)
+
+    return mask
 
 
 class ColorfulFormatter(logging.Formatter):

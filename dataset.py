@@ -1,4 +1,5 @@
 import random
+import json
 import pickle
 from pathlib import Path
 from typing import List, Set
@@ -11,7 +12,7 @@ from torchvision import transforms
 from PIL import Image
 
 from config import configurable
-from misc import cords_to_map, draw_pose_from_cords, UserError
+from misc import cords_to_map, draw_pose_from_cords, ffhq_alignment
 
 
 DATASET = {}
@@ -96,7 +97,7 @@ class DeepFashion(data.Dataset):
         self.classes = ["DF_face", "DF_human"]
         self.res = resolution
         self.xflip = xflip
-        self.available_targets = ['face', 'human', 'heatmap', 'vis_kp']
+        self.available_targets = ['face', 'human', 'heatmap', 'vis_kp', 'dlib_landmarks', 'quad_mask']
         self.targets = []
 
         root = Path(roots[0]).expanduser()
@@ -107,10 +108,11 @@ class DeepFashion(data.Dataset):
         # self.size = {"DF_face": self.__len__(), "DF_human": self.__len__()}
         # self.labels = np.zeros((len(self),), dtype=int)
 
-        src = sources[0]
-        self.face_dir = root / src / 'face'
+        self.src = sources[0]
+        self.face_dir = root / self.src / 'face'
         self.human_dir = root / f'r{self.res}' / 'images'
         self.kp_dir = root / 'kp_heatmaps/keypoints'
+        self.dlib_ann = json.load(open(root / 'df_landmarks_new.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
@@ -182,6 +184,18 @@ class DeepFashion(data.Dataset):
         if 'vis_kp' in self.targets:
             vis_kp, _ = draw_pose_from_cords(cords.astype(int), (self.res, self.res))
             data['vis_kp'] = self.transform(vis_kp)
+
+        if any(x in self.targets for x in ['dlib_landmarks', 'quad_mask']):
+            landmarks = np.array(self.dlib_ann[fileID]['face_landmarks'])
+            if self.xflip and self.idx > len(self.fileIDs):
+                landmarks[:, 0] = 1. - landmarks[:, 0]
+            landmarks = (landmarks * self.res).astype(int)
+            if 'dlib_landmarks' in self.targets:
+                data['dlib_landmarks'] = torch.from_numpy(landmarks.copy())
+
+            if 'quad_mask' in self.targets:
+                quad_mask = ffhq_alignment(landmarks, output_size=self.res, ratio=float(self.src.split('_')[-1]))
+                data['quad_mask'] = torch.from_numpy(quad_mask.copy())[None, ...]  # (c, h, w)
 
         return data
 
