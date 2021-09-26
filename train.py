@@ -320,8 +320,8 @@ class Trainer():
             sampler=self.get_sampler(self.train_ds),
             num_workers=self.cfg.DATASET.num_workers,
             pin_memory=self.cfg.DATASET.pin_memory,
-            persistent_workers=True,
-            worker_init_fn=self.train_ds.__class__.worker_init_fn
+            persistent_workers=self.cfg.DATASET.num_workers > 0,
+            worker_init_fn=self.train_ds.__class__.worker_init_fn if self.cfg.DATASET.num_workers > 0 else None
         )
         loader = self.sample_forever(train_loader, pbar=(self.local_rank == 0))
 

@@ -176,14 +176,17 @@ def ffhq_alignment(
 
     # Choose oriented crop rectangle.
     x = eye_to_eye - np.flipud(eye_to_mouth) * [-1, 1]
-    x /= np.hypot(*x)
+    x_norm = np.hypot(*x)
+    if x_norm == 0:
+        x = np.array([1.0, 0.0])
+    else:
+        x /= x_norm
 
     x *= max(np.hypot(*eye_to_eye) * ratio, np.hypot(*eye_to_mouth) * ratio * 0.9)
     y = np.flipud(x) * [-1, 1]
     c = eye_avg + eye_to_mouth * 0.1
     quad = np.stack([c - x - y, c - x + y, c + x + y, c + x - y]).astype(int)
 
-    # 
     mask = np.zeros((output_size, output_size), np.float32)
     cv2.fillConvexPoly(mask, quad, 1)
 
