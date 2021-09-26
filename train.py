@@ -65,7 +65,7 @@ class Trainer():
         self.val_ds = get_dataset(cfg, split='test', xflip=False, num_items=cfg.n_sample)
         self._samples = None
 
-        self.g, self.d = create_model(cfg, device=self.device)
+        self.g, self.d, self.atten = create_model(cfg, device=self.device)
         self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
 
         # Define optimizers with Lazy regularizer
@@ -73,13 +73,15 @@ class Trainer():
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
         self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
+        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate, betas=(0, 0.99))
 
         # Print network summary tables.
         if self.local_rank == 0:
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
             c = torch.empty([self.batch_gpu, self.d.num_classes], device=self.device)
             heatmaps = torch.empty([self.batch_gpu, *self.g.heatmap_shape], device=self.device)
-            imgs, *_ = print_module_summary(self.g, [z, heatmaps])
+            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=list(self.atten.channel_dict.keys()))
+            _ = print_module_summary(self.atten, [feats])
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
 
         # if 'fid' in self.metrics:
@@ -88,7 +90,7 @@ class Trainer():
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
         find_unused = False
-        self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
+        self.ckpt_required_keys = ["g", "atten", "d", "g_ema", "g_optim", "d_optim", "stats"]
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
         elif cfg.MODEL.teacher_weight:
@@ -111,9 +113,10 @@ class Trainer():
                 self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
                 self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
 
-        self.g_, self.d_ = self.g, self.d
+        self.g_, self.atten_, self.d_ = self.g, self.atten, self.d
         if self.num_gpus > 1:
             self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=find_unused)
+            self.atten = DDP(self.atten, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
@@ -130,6 +133,7 @@ class Trainer():
         self.autocast = True if amp else False
         self.g_scaler = GradScaler(enabled=amp)
         self.d_scaler = GradScaler(enabled=amp)
+        # TODO decide whether to enable gradscaler for attention network
         # TODO allow using tf32 for matmul and convolution
 
     def get_output_dir(self, cfg) -> Path:
@@ -286,6 +290,7 @@ class Trainer():
 
         snapshot = {
             'g': self.g_.state_dict(),
+            'atten': self.atten_.state_dict(),
             'd': self.d_.state_dict(),
             'g_ema': self.g_ema.state_dict(),
             'g_optim': self.g_optim.state_dict(),
@@ -355,7 +360,7 @@ class Trainer():
         real = torch.cat([data['face'], data['human']], dim=1).detach().requires_grad_(r1_reg)
         z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
-            fake_imgs, _ = self.g(z, data['heatmap'], on_forward=True)
+            fake_imgs, _ = self.g(z, data['heatmap'])
             if self.cfg.ADA.enabled:
                 fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
             fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
@@ -396,13 +401,14 @@ class Trainer():
     def Gmain(self, data, pl_reg=False):
         self.g_.requires_grad_with_freeze_(True)
         self.d.requires_grad_(False)
+        self.atten.requires_grad_(True)
 
         z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            fake_imgs, feats = self.g(z, data['heatmap'])
-            
+            fake_imgs, feats = self.g(z, data['heatmap'], return_feat_res=self.atten_.resolutions)
+
             if self.cfg.ADA.enabled:
                 fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
             fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
@@ -412,8 +418,9 @@ class Trainer():
             loss_Gmain = loss_Gmain + gan_loss
 
             # attention feature reconstruction loss
-            for res in feats['face'].keys():
-                rec_loss = torch.nn.functional.l1_loss(feats['atten'][res], feats['query'][res].detach())
+            query_feats, out_feats = self.atten(feats)
+            for res in self.atten_.resolutions:
+                rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
                 self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
                 loss_Gmain = loss_Gmain + rec_loss
 
@@ -425,7 +432,7 @@ class Trainer():
             cfg = self.cfg.TRAIN.PPL
             pl_bs = max(1, self.batch_gpu // cfg.bs_shrink)
             with autocast(enabled=self.autocast):
-                fake_imgs, _, ws = self.g(z[:pl_bs], data['heatmap'][:pl_bs], on_forward=True, return_dlatent=pl_reg)
+                fake_imgs, _, ws = self.g(z[:pl_bs], data['heatmap'][:pl_bs], return_dlatent=pl_reg)
                 path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
                     fake_imgs['face'],
                     ws['face'],
@@ -436,9 +443,11 @@ class Trainer():
 
         g_loss = loss_Gmain + loss_Gpl
         self.g.zero_grad(set_to_none=True)
+        self.atten.zero_grad(set_to_none=True)
         self.g_scaler.scale(g_loss).backward()
         self.g_scaler.step(self.g_optim)
         self.g_scaler.update()
+        self.a_optim.step()
 
     def reduce_stats(self):
         """ Reduce all training stats to master for reporting. """
@@ -491,7 +500,7 @@ class Trainer():
 
         z = torch.randn([self._samples['heatmap'].shape[0], self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
-            fake_imgs, _ = self.g_ema(z, self._samples['heatmap'], on_forward=True)
+            fake_imgs, _ = self.g_ema(z, self._samples['heatmap'])
 
         if self.num_gpus > 1:
             _fake = {}

@@ -46,6 +46,12 @@ _C.MODEL.SYNTHESIS.pose_encoder_kwargs.name = 'DefaultPoseEncoder'
 _C.MODEL.SYNTHESIS.channel_base = 32768
 _C.MODEL.SYNTHESIS.channel_max = 512
 
+_C.MODEL.ATTENTION = CN()
+_C.MODEL.ATTENTION.down = 1
+_C.MODEL.ATTENTION.feature_types = 'relu'
+_C.MODEL.ATTENTION.n_heads = 1
+_C.MODEL.ATTENTION.ref_shrink = 1
+
 _C.MODEL.DISCRIMINATOR = CN()
 _C.MODEL.DISCRIMINATOR.img_channels = 3
 _C.MODEL.DISCRIMINATOR.branch_res = 64

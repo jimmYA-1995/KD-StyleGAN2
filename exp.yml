@@ -2,7 +2,7 @@
 name: 'FaceHuman-KD-attention'
 description: >
     Default configuration for synthesis of face & human.
-    Apply maxpooling to face features(query)
+    Apply maxpooling to face features(query), Separate Attention Network from Generator
 n_sample: 64
 resolution: 256
 classes:
@@ -50,6 +50,12 @@ MODEL:
       max_channels: 512
       heatmap_size: 256
       in_channels: 17
+
+  ATTENTION:
+    down: 8
+    feature_types: 'relu'
+    n_heads: 4
+    ref_shrink: 4
 
   DISCRIMINATOR:
     img_channels: 3

@@ -178,7 +178,7 @@ def profiled_function(fn):
 #----------------------------------------------------------------------------
 # Print summary table of module hierarchy.
 
-def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
+def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True, **input_kwargs):
     assert isinstance(module, torch.nn.Module)
     assert not isinstance(module, torch.jit.ScriptModule)
     assert isinstance(inputs, (tuple, list))
@@ -198,7 +198,7 @@ def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
     hooks += [mod.register_forward_hook(post_hook) for mod in module.modules()]
 
     # Run module.
-    outputs = module(*inputs)
+    outputs = module(*inputs, **input_kwargs)
     for hook in hooks:
         hook.remove()
 

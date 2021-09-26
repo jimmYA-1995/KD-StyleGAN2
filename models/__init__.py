@@ -12,7 +12,6 @@ def create_model(cfg, device=None, eval_only=False):
         cfg.resolution,
         mode=cfg.MODEL.mode,
         freeze_teacher=cfg.MODEL.freeze_teacher,
-        attn_res=cfg.MODEL.attn_res,
         mapping_kwargs=cfg.MODEL.MAPPING,
         synthesis_kwargs=dict(cfg.MODEL.SYNTHESIS),
     ).to(device)
@@ -20,8 +19,11 @@ def create_model(cfg, device=None, eval_only=False):
     if eval_only:
         return g.eval()
 
+    atten_channel_dict = {res: channel for res, channel in g.channel_dict.items() if res <= cfg.MODEL.attn_res}
+    assert len(atten_channel_dict), "assume attention is enabled"
+    atten = AttentionNetwork(g.classes, atten_channel_dict, **cfg.MODEL.ATTENTION).to(device)
     d = Discriminator(cfg.resolution, **cfg.MODEL.DISCRIMINATOR).to(device)
-    return g, d
+    return g, d, atten
 
 
 def map_keys(k):
