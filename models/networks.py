@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -232,35 +234,60 @@ class Generator(nn.Module):
 class AttentionNetwork(nn.Module):
     def __init__(
         self,
-        classes: List,                 # Class name for teacher & student
-        channel_dict: Dict[int, int],  # mapping from resolution to in_channels
-        down: int = 1,
-        ref_shrink: int = 1,
+        classes: List[str],             # Class name for teacher & student
+        feat_channels: Dict[int, int],  # channel mapping of synthesis network of Generator
+        resolutions: List[int] = [],
         feature_types: str = 'relu',
-        n_heads: int = 4,
     ) -> nn.Module:
         assert len(classes) == 2
+        assert resolutions, "at least one resolution"
+        assert all(x in feat_channels.keys() for x in resolutions)
         super(AttentionNetwork, self).__init__()
         self.classes = classes
-        self.resolutions = list(channel_dict.keys())
-        self.channel_dict = channel_dict
-        self.ref_shrink = ref_shrink
+        self.resolutions = resolutions
 
-        for res, in_channels in channel_dict.items():
-            self.add_module(f'{res}_atten', MultiHeadAttention(in_channels, max(1, in_channels // down), feature_types, n_heads))
+        # TODO reg, entropy
+        Recipe = namedtuple('Recipe', 'in_channel hidden_dim feat_type n_heads query_shrink mask_key')
+        self.recipes = {}  # Dict[int, namedtuple]
 
-    def forward(self, feat_dict: Dict[int, torch.Tensor]) -> Dict[int, torch.Tensor]:
+        for res in resolutions:
+            in_channel = feat_channels[res]
+            hidden_dim = max(64, in_channel // 8)
+            feat_type = feature_types
+            n_heads = 1 if res < 64 else 4
+            query_shrink = 1 if res < 16 else 4
+            mask_key = True if res >= 16 else False
+
+            self.add_module(f'{res}_atten', MultiHeadAttention(in_channel, hidden_dim, feat_type, n_heads))
+            self.recipes[res] = Recipe(in_channel, hidden_dim, feat_type, n_heads, query_shrink, mask_key)
+
+    def __repr__(self):
+        return "\n".join([f"{res}: {recipe}" for res, recipe in self.recipes.items()])
+
+    def forward(self, feat_dict: Dict[int, torch.Tensor], mask: torch.Tensor = None) -> Dict[int, torch.Tensor]:
+        if any(r.mask_key for r in self.recipes.values()):
+            assert mask is not None
+            assert_shape(mask, [None, 1, self.resolutions[-1], self.resolutions[-1]])
+
         ref, feat = [feat_dict[c] for c in self.classes]
         out_feats = {}
         query_feats = {}
-        for res in self.channel_dict.keys():
+        for res in reversed(self.resolutions):
+            r = self.recipes[res]
             query_feats[res] = ref[res]
-            if self.ref_shrink > 1 and res // self.ref_shrink >= 4:
-                query_feats[res] = F.max_pool2d(query_feats[res], kernel_size=self.ref_shrink)
+            if r.query_shrink > 1:
+                query_feats[res] = F.max_pool2d(query_feats[res], kernel_size=r.query_shrink)
 
-            out_feats[res] = getattr(self, f'{res}_atten')(query_feats[res], feat[res])
+            m = None
+            if r.mask_key:
+                m = mask = F.interpolate(mask, [res, res])
+
+            out_feats[res] = getattr(self, f'{res}_atten')(query_feats[res], feat[res], mask=m)
 
         return query_feats, out_feats
+
+    def visualize(self, res, query_points):
+        ...
 
 
 class Discriminator(nn.Module):

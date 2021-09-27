@@ -24,7 +24,7 @@ DATASET:
   sources:
     - 'align_1.2'
   xflip: true
-  num_workers: 4
+  num_workers: 0
   pin_memory: true
 
 MODEL:
@@ -33,7 +33,6 @@ MODEL:
   mode: 'joint'
   freeze_teacher: false
   teacher_weight: ''
-  attn_res: 256
 
   MAPPING:
     num_layers: 8
@@ -52,10 +51,8 @@ MODEL:
       in_channels: 17
 
   ATTENTION:
-    down: 8
+    resolutions: [4, 8, 16, 32, 64, 128, 256]
     feature_types: 'relu'
-    n_heads: 4
-    ref_shrink: 4
 
   DISCRIMINATOR:
     img_channels: 3

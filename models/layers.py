@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_utils.ops import bias_act, conv2d_resample, upfirdn2d
 
+from torch_utils.misc import assert_shape
+
 
 AVAILABLE_ACTIVATIONS = bias_act.activation_funcs.keys()
 
@@ -347,11 +349,11 @@ class MultiHeadAttention(nn.Module):
         self._hidden_dim = hidden_dim
 
         self.q_map = nn.Conv2d(in_dim, hidden_dim, 1)
-        self.k_map = nn.Conv2d(in_dim, hidden_dim, 1)
+        self.k_map = nn.Conv1d(in_dim, hidden_dim, 1)
 
-    def forward(self, x, y):
+    def forward(self, x, y, mask=None):
         rfs = self.sample_rfs(x.device)
-        qs, ks, vs = self._get_queries_keys_values(x, y, rfs)
+        qs, ks, vs = self._get_queries_keys_values(x, y, rfs, mask=mask)
         R = torch.einsum('bsij,bsik->bsijk', ks, vs)  # [Batch, Seq, n_heads, feat_dim], [Batch, Seq, n_heads, head_dim]
         num = torch.einsum('bSijk,bsij->bsik', R, qs)
 
@@ -363,15 +365,43 @@ class MultiHeadAttention(nn.Module):
 
         return outputs
 
-    def _get_queries_keys_values(self, x, y, rfs):
+    def get_matrix(self, x, y, pts, mask=None):
+        # pts: [[y1, x1], [y2, x2], ...]
+        rfs = self.sample_rfs(x.device)
+        queries, keys, _ = self._get_queries_keys_values(x, y, rfs, mask=mask, sample_pts=pts)
+        atten_matrix = torch.einsum('bsij,bSij->bsSi', queries, keys)
+        return atten_matrix
+
+    def _get_queries_keys_values(self, x, y, rfs, mask=None, sample_pts=None):
         queries = self.q_map(x)
-        queries = queries.permute(0, 2, 3, 1).reshape([x.shape[0], x.shape[2] * x.shape[3], self._n_heads, -1])
+        if sample_pts is not None:
+            # filter query by sample points (Now for visualization)
+            queries = queries[:, :, sample_pts[:, 1], sample_pts[:, 0]]
+            queries = queries.permute(0, 2, 1).reshape([x.shape[0], sample_pts.shape[0], self._n_heads, -1])
+        else:
+            queries = queries.permute(0, 2, 3, 1).reshape([x.shape[0], x.shape[2] * x.shape[3], self._n_heads, -1])
 
-        keys = self.k_map(y)
-        keys = keys.permute(0, 2, 3, 1).reshape([y.shape[0], y.shape[2] * y.shape[3], self._n_heads, -1])
+        b, yc, yh, yw = y.shape
+        if mask is not None:
+            assert_shape(mask, [None, 1, yh, yw])
+            y = y.permute(0, 2, 3, 1)
+            spatial_dims = [int(x) for x in mask.float().squeeze(1).sum(dim=[1, 2])]
+            sub_y = torch.masked_select(y, mask.to(bool).permute(0, 2, 3, 1)).reshape(-1, yc)  # [S', yc]
+            values = nn.utils.rnn.pad_sequence(
+                torch.split(sub_y, spatial_dims, dim=0),
+                batch_first=True
+            )  # [B, T, yc]
+            flattened_keys = self.k_map(sub_y.unsqueeze(-1)).squeeze(0)  # [S', hidden_dim, 1]
+            keys = nn.utils.rnn.pad_sequence(
+                torch.split(flattened_keys, spatial_dims, dim=0),  # [B, S', hidden_dim]
+                batch_first=True
+            )  # [B, T, hidden_dim]
+        else:
+            keys = self.k_map(y.flatten(2, 3)).permute(0, 2, 1)
+            values = y.permute(0, 2, 3, 1).reshape(b, yh * yw, yc)
 
-        values = y
-        values = values.permute(0, 2, 3, 1).reshape([y.shape[0], y.shape[2] * y.shape[3], self._n_heads, -1])
+        keys = keys.view([b, -1, self._n_heads, self._hidden_dim // self._n_heads])
+        values = values.view([b, -1, self._n_heads, yc // self._n_heads])
 
         if self._feature_type == 'relu':
             queries = nn.functional.relu(queries)

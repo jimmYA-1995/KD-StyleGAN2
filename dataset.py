@@ -97,7 +97,7 @@ class DeepFashion(data.Dataset):
         self.classes = ["DF_face", "DF_human"]
         self.res = resolution
         self.xflip = xflip
-        self.available_targets = ['face', 'human', 'heatmap', 'vis_kp', 'dlib_landmarks', 'quad_mask']
+        self.available_targets = ['face', 'human', 'heatmap', 'vis_kp', 'lm', 'align_lm', 'quad_mask']
         self.targets = []
 
         root = Path(roots[0]).expanduser()
@@ -185,17 +185,24 @@ class DeepFashion(data.Dataset):
             vis_kp, _ = draw_pose_from_cords(cords.astype(int), (self.res, self.res))
             data['vis_kp'] = self.transform(vis_kp)
 
-        if any(x in self.targets for x in ['dlib_landmarks', 'quad_mask']):
+        if any(x in self.targets for x in ['lm', 'quad_mask']):
             landmarks = np.array(self.dlib_ann[fileID]['face_landmarks'])
             if self.xflip and self.idx > len(self.fileIDs):
                 landmarks[:, 0] = 1. - landmarks[:, 0]
             landmarks = (landmarks * self.res).astype(int)
-            if 'dlib_landmarks' in self.targets:
-                data['dlib_landmarks'] = torch.from_numpy(landmarks.copy())
+            if 'lm' in self.targets:
+                data['lm'] = torch.from_numpy(landmarks.copy())
 
             if 'quad_mask' in self.targets:
                 quad_mask = ffhq_alignment(landmarks, output_size=self.res, ratio=float(self.src.split('_')[-1]))
                 data['quad_mask'] = torch.from_numpy(quad_mask.copy())[None, ...]  # (c, h, w)
+
+        if 'align_lm' in self.targets:
+            align_lm = np.array(self.dlib_ann[fileID]['align_landmarks'])
+            if self.xflip and self.idx > len(self.fileIDs):
+                align_lm[:, 0] = 1. - align_lm[:, 0]
+            align_lm = (align_lm * self.res).astype(int)
+            data['align_lm'] = torch.from_numpy(align_lm.copy())
 
         return data
 

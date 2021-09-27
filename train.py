@@ -80,8 +80,9 @@ class Trainer():
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
             c = torch.empty([self.batch_gpu, self.d.num_classes], device=self.device)
             heatmaps = torch.empty([self.batch_gpu, *self.g.heatmap_shape], device=self.device)
-            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=list(self.atten.channel_dict.keys()))
-            _ = print_module_summary(self.atten, [feats])
+            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=self.atten.resolutions)
+            mask = torch.bernoulli(torch.empty([self.batch_gpu, 1, cfg.resolution, cfg.resolution], device=self.device).uniform_())
+            _ = print_module_summary(self.atten, [feats, mask])
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
 
         # if 'fid' in self.metrics:
@@ -312,7 +313,7 @@ class Trainer():
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
         cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
         cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = ['face', 'human', 'heatmap']
+        targets = ['face', 'human', 'heatmap', 'quad_mask']
         self.train_ds.update_targets(targets)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
@@ -418,7 +419,7 @@ class Trainer():
             loss_Gmain = loss_Gmain + gan_loss
 
             # attention feature reconstruction loss
-            query_feats, out_feats = self.atten(feats)
+            query_feats, out_feats = self.atten(feats, mask=data['quad_mask'])
             for res in self.atten_.resolutions:
                 rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
                 self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
@@ -480,7 +481,7 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            self.val_ds.update_targets(["heatmap", "vis_kp"])
+            self.val_ds.update_targets(["heatmap", "vis_kp", "quad_mask"])
             val_loader = torch.utils.data.DataLoader(
                 self.val_ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
