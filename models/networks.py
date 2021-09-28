@@ -264,30 +264,47 @@ class AttentionNetwork(nn.Module):
     def __repr__(self):
         return "\n".join([f"{res}: {recipe}" for res, recipe in self.recipes.items()])
 
-    def forward(self, feat_dict: Dict[int, torch.Tensor], mask: torch.Tensor = None) -> Dict[int, torch.Tensor]:
+    def forward(
+        self,
+        feat_dict: Dict[int, torch.Tensor],
+        mask: torch.Tensor = None,
+        sample_pts: torch.Tensor = None,
+        eval=False
+    ) -> Dict[int, torch.Tensor]:
         if any(r.mask_key for r in self.recipes.values()):
             assert mask is not None
             assert_shape(mask, [None, 1, self.resolutions[-1], self.resolutions[-1]])
 
+        if eval:
+            assert sample_pts is not None and sample_pts.shape[-1] == 2
+            eval_results = {}
+
         ref, feat = [feat_dict[c] for c in self.classes]
-        out_feats = {}
-        query_feats = {}
+        query_feats, out_feats = {}, {}
         for res in reversed(self.resolutions):
             r = self.recipes[res]
             query_feats[res] = ref[res]
-            if r.query_shrink > 1:
+            if r.query_shrink > 1 and not eval:
                 query_feats[res] = F.max_pool2d(query_feats[res], kernel_size=r.query_shrink)
 
             m = None
             if r.mask_key:
                 m = mask = F.interpolate(mask, [res, res])
 
-            out_feats[res] = getattr(self, f'{res}_atten')(query_feats[res], feat[res], mask=m)
+            atten_layer = getattr(self, f'{res}_atten')
+            if eval:
+                pts = (sample_pts * res).to(torch.int64).clamp(0, res - 1)
+                eval_results[res] = {
+                    'pts': pts,
+                    'mask': m,
+                    'matrix': atten_layer.get_matrix(query_feats[res], feat[res], pts, mask=m)
+                }
+            else:
+                out_feats[res] = atten_layer(query_feats[res], feat[res], mask=m)
 
+        if eval:
+            return eval_results
         return query_feats, out_feats
-
-    def visualize(self, res, query_points):
-        ...
 
 
 class Discriminator(nn.Module):

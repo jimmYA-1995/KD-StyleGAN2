@@ -62,7 +62,7 @@ MODEL:
 
 
 TRAIN:
-  iteration: 10
+  iteration: 5
   batch_gpu: 8
   lrate: 0.002
   R1:

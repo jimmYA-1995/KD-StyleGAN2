@@ -112,7 +112,7 @@ class DeepFashion(data.Dataset):
         self.face_dir = root / self.src / 'face'
         self.human_dir = root / f'r{self.res}' / 'images'
         self.kp_dir = root / 'kp_heatmaps/keypoints'
-        self.dlib_ann = json.load(open(root / 'df_landmarks_new.json', 'r'))
+        self.dlib_ann = json.load(open(root / 'df_landmarks_align.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
@@ -189,19 +189,26 @@ class DeepFashion(data.Dataset):
             landmarks = np.array(self.dlib_ann[fileID]['face_landmarks'])
             if self.xflip and self.idx > len(self.fileIDs):
                 landmarks[:, 0] = 1. - landmarks[:, 0]
-            landmarks = (landmarks * self.res).astype(int)
+
             if 'lm' in self.targets:
                 data['lm'] = torch.from_numpy(landmarks.copy())
 
+            landmarks = (landmarks * self.res).astype(int)
             if 'quad_mask' in self.targets:
                 quad_mask = ffhq_alignment(landmarks, output_size=self.res, ratio=float(self.src.split('_')[-1]))
                 data['quad_mask'] = torch.from_numpy(quad_mask.copy())[None, ...]  # (c, h, w)
 
         if 'align_lm' in self.targets:
             align_lm = np.array(self.dlib_ann[fileID]['align_landmarks'])
+            eye_left = np.mean(align_lm[36:42], axis=0, keepdims=True)
+            eye_right = np.mean(align_lm[42:48], axis=0, keepdims=True)
+            nose = align_lm[30:31]
+            mouth_avg = (align_lm[48:49] + align_lm[54:55]) * 0.5
+            profile = align_lm[(0, 3, 6, 8, 10, 13, 16), :]
+            align_lm = np.concatenate([eye_left, eye_right, nose, mouth_avg, profile], axis=0)
             if self.xflip and self.idx > len(self.fileIDs):
                 align_lm[:, 0] = 1. - align_lm[:, 0]
-            align_lm = (align_lm * self.res).astype(int)
+            # align_lm = (align_lm * self.res).astype(int)
             data['align_lm'] = torch.from_numpy(align_lm.copy())
 
         return data

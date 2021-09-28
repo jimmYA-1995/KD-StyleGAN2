@@ -3,6 +3,7 @@ import functools
 import os
 import random
 import sys
+from typing import Dict
 import warnings
 from collections import OrderedDict
 from pathlib import Path
@@ -481,51 +482,118 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            self.val_ds.update_targets(["heatmap", "vis_kp", "quad_mask"])
+            self.val_ds.update_targets(["heatmap", "vis_kp", "quad_mask", "align_lm"])
             val_loader = torch.utils.data.DataLoader(
                 self.val_ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
                 sampler=self.get_sampler(self.val_ds, eval=True)
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(val_loader)).items()}
-            if self.num_gpus > 1:
-                # sync conditional vis.
-                _vis_kp = []
-                for src in range(self.num_gpus):
-                    y = self._samples['vis_kp'].clone()
-                    torch.distributed.broadcast(y, src=src)
-                    _vis_kp.append(y)
-                self.vis_kp = torch.stack(_vis_kp, dim=1).flatten(0, 1)
-            else:
-                self.vis_kp = self._samples['vis_kp']
+            self.vis_kp = self.all_gather(self._samples['vis_kp'])
 
         z = torch.randn([self._samples['heatmap'].shape[0], self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
-            fake_imgs, _ = self.g_ema(z, self._samples['heatmap'])
+            _fake_imgs, feats = self.g_ema(z, self._samples['heatmap'], return_feat_res=self.atten_.resolutions)
+            atten_out = self.atten(feats, self._samples['quad_mask'], self._samples['align_lm'], eval=True)
 
-        if self.num_gpus > 1:
-            _fake = {}
-            for cn, x in fake_imgs.items():
-                _f = []
-                for src in range(self.num_gpus):
-                    y = x.clone()
-                    torch.distributed.broadcast(y, src=src)
-                    _f.append(y)
-                _fake[cn] = torch.stack(_f, dim=1).flatten(0, 1)
-            fake_imgs = _fake
-        for cn, x in fake_imgs.items():
-            assert x.shape[0] == self.cfg.n_sample, f"{cn}: {x.shape[0]} v.s {self.cfg.n_sample}"
+        fake_imgs = {}
+        for cn, x in _fake_imgs.items():
+            fake_imgs[cn] = self.all_gather(x)
+            if self.local_rank == 0:
+                assert fake_imgs[cn].shape[0] == self.cfg.n_sample
 
-        _samples = [fake_imgs['face'], fake_imgs['human'], self.vis_kp]
-        samples = torch.stack(_samples, dim=1).flatten(0, 1)
+        if self.local_rank == 0:
+            self.plot_attention(
+                self.outdir / 'samples' / f'fake-{i :06d}-atten.png',
+                _fake_imgs,
+                atten_out,
+                self._samples['align_lm']
+            )
 
-        save_image(
-            samples,
-            self.outdir / 'samples' / f'fake-{i :06d}.png',
-            nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
-            normalize=True,
-            value_range=(-1, 1),
-        )
+            _samples = [fake_imgs['face'], fake_imgs['human'], self.vis_kp]
+            samples = torch.stack(_samples, dim=1).flatten(0, 1)
+            save_image(
+                samples,
+                self.outdir / 'samples' / f'fake-{i :06d}.png',
+                nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
+                normalize=True,
+                value_range=(-1, 1),
+            )
+
+    def plot_attention(self, out_path, imgs, attens, raw_sample_pts):
+        top_res = self.cfg.resolution
+        faces = np.clip(imgs['face'].cpu().numpy().transpose(0, 2, 3, 1) * 127.5 + 127.5, 0, 255).astype(np.uint8)
+        humans = np.clip(imgs['human'].cpu().numpy().transpose(0, 2, 3, 1) * 127.5 + 127.5, 0, 255).astype(np.uint8)
+        raw_sample_pts = raw_sample_pts.cpu().numpy()
+        img_grids = [None for _ in range(faces.shape[0])]
+        for res, a in attens.items():
+            if res in [4, 8]:
+                continue
+
+            query_pts = a['pts'].cpu().numpy()    # [B, Q, 2]
+            matrices = a['matrix'].cpu().numpy()  # [B, Q, S, h]
+            mask = a['mask']                      # [B, 1, res, res] or None
+            if mask is not None:
+                mask = mask.cpu().numpy()
+
+            for i, matrix in enumerate(matrices):
+                face = cv2.resize(faces[i], (res, res), interpolation=cv2.INTER_CUBIC)
+                human = cv2.resize(humans[i], (res, res), interpolation=cv2.INTER_CUBIC)
+                img = np.concatenate([faces[i], humans[i]], axis=1)
+                raw_sample_pt = raw_sample_pts[i]
+                src_pts = query_pts[i]
+                if mask is not None:
+                    m = mask[i, 0]
+                    alpha = (m[..., None] * 255).astype(np.uint8)
+                    human = np.concatenate([human, np.where(alpha == 0, 128, alpha)], axis=-1)
+                    y_indices, x_indices = np.nonzero(m)
+                    matrix = matrix[:, :len(y_indices)]  # truncate padding area
+                else:
+                    human = np.concatenate([human, np.full((res, res, 1), 255, dtype=np.uint8)], axis=-1)
+                    y_indices, x_indices = np.meshgrid(np.arange(res), np.arange(res))
+                face = np.concatenate([face, np.full((res, res, 1), 255, dtype=np.uint8)], axis=-1)
+                indices = np.vstack([x_indices, y_indices]).T  # [s, 2]
+                img = np.concatenate([face, human], axis=1)
+
+                # method 1: find the indices on human image which face pts have highest scores
+                highest_indices = matrix.argmax(axis=1)
+                n_head = highest_indices.shape[1]
+                required = n_head // (top_res // res) + int(n_head % (top_res // res) != 0)
+                gallery = np.zeros((top_res, required * res * 2, 4), np.uint8)
+                for h_idx in range(n_head):
+                    vis_img = img.copy()
+                    label = f"{res}x{res}-head{h_idx+1}"
+                    highest = highest_indices[:, h_idx]  # [Q,]
+                    dst_pts = np.take(indices, highest, axis=0)  # [Q, 2]
+                    dst_pts[:, 0] += res
+                    for raw_src, src, dst in zip(raw_sample_pt, src_pts, dst_pts):
+                        if (raw_src < 0).any() or (raw_src > 256).any():
+                            continue
+                        cv2.line(vis_img, tuple(src), tuple(dst), (255, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+
+                    x1 = h_idx // (top_res // res) * res * 2
+                    y1 = h_idx % (top_res // res) * res
+                    gallery[y1: y1 + res, x1: x1 + (res * 2), :] = vis_img.astype(np.uint8)
+
+                if img_grids[i] is not None:
+                    img_grids[i] = np.concatenate([img_grids[i], gallery], axis=1)
+                else:
+                    img_grids[i] = gallery
+
+        out = np.concatenate(img_grids, axis=0)
+        Image.fromarray(out, mode='RGBA').save(out_path)
+
+    def all_gather(self, tensor, cat_dim=0):
+        """ All gather `tensor` and concatenate along `cat_dim`. When write this code,
+            NCCL does not support `gather`
+        """
+        if self.num_gpus == 1:
+            return tensor
+
+        gather_list = [torch.zeros_like(tensor) for _ in range(self.num_gpus)]
+        torch.distributed.all_gather(gather_list, tensor)
+
+        return torch.cat(gather_list, dim=cat_dim)
 
     def clear(self):
         if getattr(self, 'pbar', None):

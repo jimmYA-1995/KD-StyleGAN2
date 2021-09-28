@@ -376,8 +376,11 @@ class MultiHeadAttention(nn.Module):
         queries = self.q_map(x)
         if sample_pts is not None:
             # filter query by sample points (Now for visualization)
-            queries = queries[:, :, sample_pts[:, 1], sample_pts[:, 0]]
-            queries = queries.permute(0, 2, 1).reshape([x.shape[0], sample_pts.shape[0], self._n_heads, -1])
+            qs = []
+            for q, sample_pt in zip(queries, sample_pts):
+                qs.append(q[:, sample_pt[:, 1], sample_pt[:, 0]])
+            queries = torch.stack(qs, 0)
+            queries = queries.permute(0, 2, 1).reshape([x.shape[0], sample_pts.shape[1], self._n_heads, -1])
         else:
             queries = queries.permute(0, 2, 3, 1).reshape([x.shape[0], x.shape[2] * x.shape[3], self._n_heads, -1])
 
