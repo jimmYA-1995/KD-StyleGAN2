@@ -27,6 +27,7 @@ from torch_utils.misc import print_module_summary, constant
 
 
 OUTDIR_MAX_LEN = 1024
+warnings.filterwarnings('ignore')
 
 
 def parse_iter(filename):
@@ -64,6 +65,9 @@ class Trainer():
 
         self.train_ds = get_dataset(cfg, split='all')
         self.val_ds = get_dataset(cfg, split='test', xflip=False, num_items=cfg.n_sample)
+        self.fixed_mask = torch.zeros([1, 1, cfg.resolution, cfg.resolution], device=self.device)
+        self.fixed_mask[(slice(None), slice(None)) + self.train_ds.mask_slice] = 1.
+        self.fixed_mask = self.fixed_mask.repeat(self.batch_gpu, 1, 1, 1)
         self._samples = None
 
         self.g, self.d, self.atten = create_model(cfg, device=self.device)
@@ -80,7 +84,7 @@ class Trainer():
         if self.local_rank == 0:
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
             c = torch.empty([self.batch_gpu, self.d.num_classes], device=self.device)
-            heatmaps = torch.empty([self.batch_gpu, *self.g.heatmap_shape], device=self.device)
+            heatmaps = None
             imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=self.atten.resolutions)
             mask = torch.bernoulli(torch.empty([self.batch_gpu, 1, cfg.resolution, cfg.resolution], device=self.device).uniform_())
             _ = print_module_summary(self.atten, [feats, mask])
@@ -188,7 +192,8 @@ class Trainer():
         exp_name = cfg.pop('name')
         desc = cfg.pop('description')
         run = wandb.init(
-            project=f'FaceHuman-KD_attention',
+            project=f'FaceHuman-KD_attention-fixed_face_pos',
+            id=self.wandb_id,
             name=exp_name,
             config=cfg,
             notes=desc,
@@ -314,7 +319,7 @@ class Trainer():
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
         cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
         cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = ['face', 'human', 'heatmap', 'quad_mask']
+        targets = ['face', 'human']
         self.train_ds.update_targets(targets)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
@@ -326,6 +331,7 @@ class Trainer():
             worker_init_fn=self.train_ds.__class__.worker_init_fn if self.cfg.DATASET.num_workers > 0 else None
         )
         loader = self.sample_forever(train_loader, pbar=(self.local_rank == 0))
+        self.rec_loss = MaskedRecLoss(mask=None, num_channels=1, device=self.device)
 
         for i in range(self.start_iter, self.cfg.TRAIN.iteration):
             data = next(loader)
@@ -360,9 +366,9 @@ class Trainer():
         if self.cfg.ADA.enabled:
             data['face'] = self.augment_pipe(data['face'])
         real = torch.cat([data['face'], data['human']], dim=1).detach().requires_grad_(r1_reg)
-        z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
+        z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
-            fake_imgs, _ = self.g(z, data['heatmap'])
+            fake_imgs, _ = self.g(z, None)
             if self.cfg.ADA.enabled:
                 fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
             fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
@@ -405,11 +411,11 @@ class Trainer():
         self.d.requires_grad_(False)
         self.atten.requires_grad_(True)
 
-        z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
+        z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            fake_imgs, feats = self.g(z, data['heatmap'], return_feat_res=self.atten_.resolutions)
+            fake_imgs, feats = self.g(z, None, return_feat_res=self.atten_.resolutions)
 
             if self.cfg.ADA.enabled:
                 fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
@@ -420,12 +426,17 @@ class Trainer():
             loss_Gmain = loss_Gmain + gan_loss
 
             # attention feature reconstruction loss
-            query_feats, out_feats = self.atten(feats, mask=data['quad_mask'])
+            query_feats, out_feats = self.atten(feats, mask=self.fixed_mask[z.shape[0]].detach())
             for res in self.atten_.resolutions:
                 rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
                 self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
                 loss_Gmain = loss_Gmain + rec_loss
 
+            rec_targets = torch.nn.functional.interpolate(fake_imgs['face'], self.train_ds.mask_size, mode='bicubic').detach()
+            s = self.train_ds.mask_slice
+            loss_rec = self.rec_loss(rec_targets, fake_imgs['human'][(slice(None), slice(None)) + self.train_ds.mask_slice])
+            self.stats['loss/G-reconstruction'] = loss_rec.detach()
+            loss_Gmain = loss_Gmain + loss_rec
         # self.g.zero_grad(set_to_none=True)
         # self.g_scaler.scale(loss_Gmain).backward()
         # self.g_scaler.step(self.g_optim)
@@ -434,7 +445,7 @@ class Trainer():
             cfg = self.cfg.TRAIN.PPL
             pl_bs = max(1, self.batch_gpu // cfg.bs_shrink)
             with autocast(enabled=self.autocast):
-                fake_imgs, _, ws = self.g(z[:pl_bs], data['heatmap'][:pl_bs], return_dlatent=pl_reg)
+                fake_imgs, _, ws = self.g(z[:pl_bs], None, return_dlatent=pl_reg)
                 path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
                     fake_imgs['face'],
                     ws['face'],
@@ -482,19 +493,27 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            self.val_ds.update_targets(["heatmap", "vis_kp", "quad_mask", "align_lm"])
+            self.val_ds.update_targets(["face", "human", "face_lm"])
             val_loader = torch.utils.data.DataLoader(
                 self.val_ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
                 sampler=self.get_sampler(self.val_ds, eval=True)
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(val_loader)).items()}
-            self.vis_kp = self.all_gather(self._samples['vis_kp'])
+            _samples = [self.all_gather(self._samples[k]) for k in ('face', 'human')]
+            samples = torch.stack(_samples, dim=1).flatten(0, 1)
+            save_image(
+                samples,
+                self.outdir / 'samples' / f'real.png',
+                nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
+                normalize=True,
+                value_range=(-1, 1),
+            )
 
-        z = torch.randn([self._samples['heatmap'].shape[0], self.g_ema.z_dim], device=self.device)
+        z = torch.randn([self._samples['face'].shape[0], self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
-            _fake_imgs, feats = self.g_ema(z, self._samples['heatmap'], return_feat_res=self.atten_.resolutions)
-            atten_out = self.atten(feats, self._samples['quad_mask'], self._samples['align_lm'], eval=True)
+            _fake_imgs, feats = self.g_ema(z, None, return_feat_res=self.atten_.resolutions)
+            atten_out = self.atten(feats, self.fixed_mask[z.shape[0]].detach(), self._samples['face_lm'], eval=True)
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
@@ -507,10 +526,10 @@ class Trainer():
                 self.outdir / 'samples' / f'fake-{i :06d}-atten.png',
                 _fake_imgs,
                 atten_out,
-                self._samples['align_lm']
+                self._samples['face_lm']
             )
 
-            _samples = [fake_imgs['face'], fake_imgs['human'], self.vis_kp]
+            _samples = [fake_imgs['face'], fake_imgs['human']]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
             save_image(
                 samples,

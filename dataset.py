@@ -97,7 +97,10 @@ class DeepFashion(data.Dataset):
         self.classes = ["DF_face", "DF_human"]
         self.res = resolution
         self.xflip = xflip
-        self.available_targets = ['face', 'human', 'heatmap', 'vis_kp', 'lm', 'align_lm', 'quad_mask']
+        # all targets: ['face', 'human', 'heatmap', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
+        self.available_targets = ['face', 'human', 'face_lm']
+        self.mask_slice = (slice(16, 80), slice(96, 160))
+        self.mask_size = (64, 64)
         self.targets = []
 
         root = Path(roots[0]).expanduser()
@@ -110,9 +113,9 @@ class DeepFashion(data.Dataset):
 
         self.src = sources[0]
         self.face_dir = root / self.src / 'face'
-        self.human_dir = root / f'r{self.res}' / 'images'
+        self.human_dir = root / f'r{self.res}' / 'fixed_face_position'
         self.kp_dir = root / 'kp_heatmaps/keypoints'
-        self.dlib_ann = json.load(open(root / 'df_landmarks_align.json', 'r'))
+        self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
@@ -198,18 +201,18 @@ class DeepFashion(data.Dataset):
                 quad_mask = ffhq_alignment(landmarks, output_size=self.res, ratio=float(self.src.split('_')[-1]))
                 data['quad_mask'] = torch.from_numpy(quad_mask.copy())[None, ...]  # (c, h, w)
 
-        if 'align_lm' in self.targets:
-            align_lm = np.array(self.dlib_ann[fileID]['align_landmarks'])
-            eye_left = np.mean(align_lm[36:42], axis=0, keepdims=True)
-            eye_right = np.mean(align_lm[42:48], axis=0, keepdims=True)
-            nose = align_lm[30:31]
-            mouth_avg = (align_lm[48:49] + align_lm[54:55]) * 0.5
-            profile = align_lm[(0, 3, 6, 8, 10, 13, 16), :]
-            align_lm = np.concatenate([eye_left, eye_right, nose, mouth_avg, profile], axis=0)
+        if 'face_lm' in self.targets:
+            face_lm = np.array(self.dlib_ann[fileID]['landmarks_unalign1.0'])
+            eye_left = np.mean(face_lm[36:42], axis=0, keepdims=True)
+            eye_right = np.mean(face_lm[42:48], axis=0, keepdims=True)
+            nose = face_lm[30:31]
+            mouth_avg = (face_lm[48:49] + face_lm[54:55]) * 0.5
+            profile = face_lm[(0, 3, 6, 8, 10, 13, 16), :]
+            face_lm = np.concatenate([eye_left, eye_right, nose, mouth_avg, profile], axis=0)
             if self.xflip and self.idx > len(self.fileIDs):
-                align_lm[:, 0] = 1. - align_lm[:, 0]
-            # align_lm = (align_lm * self.res).astype(int)
-            data['align_lm'] = torch.from_numpy(align_lm.copy())
+                face_lm[:, 0] = 1. - face_lm[:, 0]
+
+            data['face_lm'] = torch.from_numpy(face_lm.copy())
 
         return data
 
