@@ -314,7 +314,7 @@ class Trainer():
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
         cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
         cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = ['face', 'human', 'heatmap', 'quad_mask']
+        targets = ['face', 'human', 'heatmap']
         self.train_ds.update_targets(targets)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
@@ -420,7 +420,7 @@ class Trainer():
             loss_Gmain = loss_Gmain + gan_loss
 
             # attention feature reconstruction loss
-            query_feats, out_feats = self.atten(feats, mask=data['quad_mask'])
+            query_feats, out_feats = self.atten(feats, mask=None)
             for res in self.atten_.resolutions:
                 rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
                 self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
@@ -482,7 +482,7 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            self.val_ds.update_targets(["heatmap", "vis_kp", "quad_mask", "align_lm"])
+            self.val_ds.update_targets(["heatmap", "vis_kp", "align_lm"])
             val_loader = torch.utils.data.DataLoader(
                 self.val_ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
@@ -494,7 +494,7 @@ class Trainer():
         z = torch.randn([self._samples['heatmap'].shape[0], self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
             _fake_imgs, feats = self.g_ema(z, self._samples['heatmap'], return_feat_res=self.atten_.resolutions)
-            atten_out = self.atten(feats, self._samples['quad_mask'], self._samples['align_lm'], eval=True)
+            atten_out = self.atten(feats, None, self._samples['align_lm'], eval=True)
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
@@ -550,7 +550,7 @@ class Trainer():
                     matrix = matrix[:, :len(y_indices)]  # truncate padding area
                 else:
                     human = np.concatenate([human, np.full((res, res, 1), 255, dtype=np.uint8)], axis=-1)
-                    y_indices, x_indices = np.meshgrid(np.arange(res), np.arange(res))
+                    y_indices, x_indices = [_.flatten() for _ in np.meshgrid(np.arange(res), np.arange(res))]
                 face = np.concatenate([face, np.full((res, res, 1), 255, dtype=np.uint8)], axis=-1)
                 indices = np.vstack([x_indices, y_indices]).T  # [s, 2]
                 img = np.concatenate([face, human], axis=1)
