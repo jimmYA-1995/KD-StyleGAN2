@@ -256,7 +256,7 @@ class AttentionNetwork(nn.Module):
             feat_type = feature_types
             n_heads = 1 if res < 64 else 4
             query_shrink = 1 if res < 16 else 4
-            mask_key = False
+            mask_key = True if res >= 16 else False
 
             self.add_module(f'{res}_atten', MultiHeadAttention(in_channel, hidden_dim, feat_type, n_heads))
             self.recipes[res] = Recipe(in_channel, hidden_dim, feat_type, n_heads, query_shrink, mask_key)
