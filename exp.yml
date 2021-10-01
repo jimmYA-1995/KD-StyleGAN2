@@ -46,7 +46,7 @@ MODEL:
     channel_base: 16384
 
   ATTENTION:
-    resolutions: [4, 8, 16, 32, 64, 128, 256]
+    resolutions: []
     feature_types: 'relu'
 
   DISCRIMINATOR:

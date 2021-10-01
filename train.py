@@ -78,16 +78,18 @@ class Trainer():
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
         self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
-        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate, betas=(0, 0.99))
+        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate, betas=(0, 0.99)) if self.atten is not None else None
 
         # Print network summary tables.
         if self.local_rank == 0:
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
             c = torch.empty([self.batch_gpu, self.d.num_classes], device=self.device)
             heatmaps = None
-            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=self.atten.resolutions)
+            return_feat_res = None if self.atten is None else self.atten.resolutions
+            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=return_feat_res)
             mask = torch.bernoulli(torch.empty([self.batch_gpu, 1, cfg.resolution, cfg.resolution], device=self.device).uniform_())
-            _ = print_module_summary(self.atten, [feats, mask])
+            if self.atten is not None:
+                _ = print_module_summary(self.atten, [feats, mask])
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
 
         # if 'fid' in self.metrics:
@@ -122,8 +124,9 @@ class Trainer():
         self.g_, self.atten_, self.d_ = self.g, self.atten, self.d
         if self.num_gpus > 1:
             self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=find_unused)
-            self.atten = DDP(self.atten, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+            if self.atten is not None:
+                self.atten = DDP(self.atten, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
             self.run = self.launch_wandb()
@@ -297,7 +300,7 @@ class Trainer():
 
         snapshot = {
             'g': self.g_.state_dict(),
-            'atten': self.atten_.state_dict(),
+            'atten': self.atten_.state_dict() if self.atten_ is not None else None,
             'd': self.d_.state_dict(),
             'g_ema': self.g_ema.state_dict(),
             'g_optim': self.g_optim.state_dict(),
@@ -409,13 +412,15 @@ class Trainer():
     def Gmain(self, data, pl_reg=False):
         self.g_.requires_grad_with_freeze_(True)
         self.d.requires_grad_(False)
-        self.atten.requires_grad_(True)
+        if self.atten is not None:
+            self.atten.requires_grad_(True)
 
         z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            fake_imgs, feats = self.g(z, None, return_feat_res=self.atten_.resolutions)
+            return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
+            fake_imgs, feats = self.g(z, None, return_feat_res=return_feat_res)
 
             if self.cfg.ADA.enabled:
                 fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
@@ -426,11 +431,13 @@ class Trainer():
             loss_Gmain = loss_Gmain + gan_loss
 
             # attention feature reconstruction loss
-            query_feats, out_feats = self.atten(feats, mask=self.fixed_mask[z.shape[0]].detach())
-            for res in self.atten_.resolutions:
-                rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
-                self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
-                loss_Gmain = loss_Gmain + rec_loss
+            if self.atten is not None:
+                self.atten.zero_grad(set_to_none=True)
+                query_feats, out_feats = self.atten(feats, mask=self.fixed_mask[z.shape[0]].detach())
+                for res in return_feat_res:
+                    rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
+                    self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
+                    loss_Gmain = loss_Gmain + rec_loss
 
             rec_targets = torch.nn.functional.interpolate(fake_imgs['face'], self.train_ds.mask_size, mode='bicubic').detach()
             s = self.train_ds.mask_slice
@@ -456,11 +463,11 @@ class Trainer():
 
         g_loss = loss_Gmain + loss_Gpl
         self.g.zero_grad(set_to_none=True)
-        self.atten.zero_grad(set_to_none=True)
         self.g_scaler.scale(g_loss).backward()
         self.g_scaler.step(self.g_optim)
         self.g_scaler.update()
-        self.a_optim.step()
+        if self.a_optim is not None:
+            self.a_optim.step()
 
     def reduce_stats(self):
         """ Reduce all training stats to master for reporting. """
@@ -511,9 +518,11 @@ class Trainer():
             )
 
         z = torch.randn([self._samples['face'].shape[0], self.g_ema.z_dim], device=self.device)
+        return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
         with torch.no_grad():
-            _fake_imgs, feats = self.g_ema(z, None, return_feat_res=self.atten_.resolutions)
-            atten_out = self.atten(feats, self.fixed_mask[z.shape[0]].detach(), self._samples['face_lm'], eval=True)
+            _fake_imgs, feats = self.g_ema(z, None, return_feat_res=return_feat_res)
+            if self.atten is not None:
+                atten_out = self.atten(feats, self.fixed_mask[z.shape[0]].detach(), self._samples['face_lm'], eval=True)
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
@@ -522,12 +531,13 @@ class Trainer():
                 assert fake_imgs[cn].shape[0] == self.cfg.n_sample
 
         if self.local_rank == 0:
-            self.plot_attention(
-                self.outdir / 'samples' / f'fake-{i :06d}-atten.png',
-                _fake_imgs,
-                atten_out,
-                self._samples['face_lm']
-            )
+            if return_feat_res:
+                self.plot_attention(
+                    self.outdir / 'samples' / f'fake-{i :06d}-atten.png',
+                    _fake_imgs,
+                    atten_out,
+                    self._samples['face_lm']
+                )
 
             _samples = [fake_imgs['face'], fake_imgs['human']]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
