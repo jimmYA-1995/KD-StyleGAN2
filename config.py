@@ -65,6 +65,7 @@ _C.TRAIN = CN()
 _C.TRAIN.iteration = 80000
 _C.TRAIN.batch_gpu = 16
 _C.TRAIN.lrate = 0.002
+_C.TRAIN.lrate_atten = 0.002
 _C.TRAIN.PPL = CN()
 _C.TRAIN.PPL.gain = 2
 _C.TRAIN.PPL.bs_shrink = 2

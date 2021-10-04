@@ -60,6 +60,7 @@ TRAIN:
   iteration: 5
   batch_gpu: 8
   lrate: 0.002
+  lrate_atten: 0.002
   R1:
     every: 16
     gamma: 10

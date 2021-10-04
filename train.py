@@ -78,7 +78,7 @@ class Trainer():
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
         self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
-        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate, betas=(0, 0.99)) if self.atten is not None else None
+        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate_atten, betas=(0, 0.99)) if self.atten is not None else None
 
         # Print network summary tables.
         if self.local_rank == 0:
@@ -433,7 +433,7 @@ class Trainer():
             # attention feature reconstruction loss
             if self.atten is not None:
                 self.atten.zero_grad(set_to_none=True)
-                query_feats, out_feats = self.atten(feats, mask=self.fixed_mask[z.shape[0]].detach())
+                query_feats, out_feats = self.atten(feats, mask=self.fixed_mask[:z.shape[0]].detach())
                 for res in return_feat_res:
                     rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
                     self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
@@ -522,7 +522,7 @@ class Trainer():
         with torch.no_grad():
             _fake_imgs, feats = self.g_ema(z, None, return_feat_res=return_feat_res)
             if self.atten is not None:
-                atten_out = self.atten(feats, self.fixed_mask[z.shape[0]].detach(), self._samples['face_lm'], eval=True)
+                atten_out = self.atten(feats, self.fixed_mask[0:1].repeat(z.shape[0], 1, 1, 1), self._samples['face_lm'], eval=True)
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
