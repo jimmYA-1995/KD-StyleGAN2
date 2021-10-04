@@ -185,7 +185,7 @@ class DeepFashion(data.Dataset):
             assert 'face' in data, "require face targets to make masked_face"
             # 4 channel masked face with face
             dist = self.big if np.random.random() > 0.7 else self.small
-            x = self.rng.normal(loc=dist.X_mean, scale=dist.X_std, size=()) * (self.res / 1024)
+            x = self.rng.normal(loc=dist.X_mean, scale=dist.X_std, size=()) * 0.45
             cx = self.rng.normal(loc=dist.cx_mean, scale=dist.cx_std, size=()) * (self.res / 1024)
             cx = np.clip(cx, int(0.125 * self.res), int(0.875 * self.res))
             cy = self.rng.normal(loc=dist.cy_mean, scale=dist.cy_std, size=()) * (self.res / 1024)

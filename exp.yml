@@ -20,7 +20,7 @@ DATASET:
   roots:
     - '~/data/deepfashion'
   sources:
-    - 'align_1.2'
+    - 'unalign_1.0'
   xflip: true
   num_workers: 0
   pin_memory: true
