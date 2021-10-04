@@ -62,29 +62,29 @@ class Trainer():
             (self.outdir / 'config.yml').write_text(cfg.dump())
             print(cfg)
 
-        self.train_ds = get_dataset(cfg, split='all')
+        self.train_ds = get_dataset(cfg, split='train')
         self.val_ds = get_dataset(cfg, split='test', xflip=False, num_items=cfg.n_sample)
         self._samples = None
 
-        self.g, self.d, self.atten = create_model(cfg, device=self.device)
+        self.g, self.d = create_model(cfg, device=self.device)
         self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
+
+        self.rec_loss = MaskedRecLoss(mask='gaussian', num_channels=1, device=self.device)
 
         # Define optimizers with Lazy regularizer
         g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1) if cfg.TRAIN.PPL.every != -1 else 1
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
         self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
-        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate, betas=(0, 0.99))
 
         # Print network summary tables.
         if self.local_rank == 0:
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
-            c = torch.empty([self.batch_gpu, self.d.num_classes], device=self.device)
-            heatmaps = torch.empty([self.batch_gpu, *self.g.heatmap_shape], device=self.device)
-            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=self.atten.resolutions)
-            mask = torch.bernoulli(torch.empty([self.batch_gpu, 1, cfg.resolution, cfg.resolution], device=self.device).uniform_())
-            _ = print_module_summary(self.atten, [feats, mask])
-            print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=1)])
+            face = torch.empty([self.batch_gpu, 3, 256, 256], device=self.device).detach()
+            masked_face = torch.empty([self.batch_gpu, 4, 256, 256], device=self.device).detach()
+            # heatmaps = torch.empty([self.batch_gpu, *self.g.heatmap_shape], device=self.device)
+            imgs = print_module_summary(self.g, [z], face=face, content=masked_face)
+            print_module_summary(self.d, [imgs[cfg.classes[0]]])
 
         # if 'fid' in self.metrics:
         #     self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
@@ -92,7 +92,7 @@ class Trainer():
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
         find_unused = False
-        self.ckpt_required_keys = ["g", "atten", "d", "g_ema", "g_optim", "d_optim", "stats"]
+        self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
         elif cfg.MODEL.teacher_weight:
@@ -115,10 +115,9 @@ class Trainer():
                 self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
                 self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
 
-        self.g_, self.atten_, self.d_ = self.g, self.atten, self.d
+        self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
             self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=find_unused)
-            self.atten = DDP(self.atten, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
@@ -188,7 +187,7 @@ class Trainer():
         exp_name = cfg.pop('name')
         desc = cfg.pop('description')
         run = wandb.init(
-            project=f'FaceHuman-KD_attention',
+            project=f'Research',
             name=exp_name,
             config=cfg,
             notes=desc,
@@ -292,7 +291,6 @@ class Trainer():
 
         snapshot = {
             'g': self.g_.state_dict(),
-            'atten': self.atten_.state_dict(),
             'd': self.d_.state_dict(),
             'g_ema': self.g_ema.state_dict(),
             'g_optim': self.g_optim.state_dict(),
@@ -312,9 +310,7 @@ class Trainer():
     def train(self):
         # default value for loss, metrics
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
-        cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
-        cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = ['face', 'human', 'heatmap', 'quad_mask']
+        targets = ['face', 'masked_face', 'human']
         self.train_ds.update_targets(targets)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
@@ -357,15 +353,12 @@ class Trainer():
         self.d.requires_grad_(True)
 
         loss_Dmain = loss_Dr1 = 0
-        if self.cfg.ADA.enabled:
-            data['face'] = self.augment_pipe(data['face'])
-        real = torch.cat([data['face'], data['human']], dim=1).detach().requires_grad_(r1_reg)
-        z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
+        real = self.augment_pipe(data['face']) if self.cfg.ADA.enabled else data['face']
+        real = real.detach().requires_grad_(r1_reg)
+        z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
-            fake_imgs, _ = self.g(z, data['heatmap'])
-            if self.cfg.ADA.enabled:
-                fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
-            fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
+            fake_imgs = self.g(z, face=data['face'], content=data['masked_face'])
+            fake = self.augment_pipe(fake_imgs['human']) if self.cfg.ADA.enabled else fake_imgs['human']
 
             real_pred = self.d(real)
             fake_pred = self.d(fake)
@@ -391,65 +384,48 @@ class Trainer():
 
         d_loss = loss_Dmain + loss_Dr1
         self.d.zero_grad(set_to_none=True)
-        # d_loss.backward()
-        # for param in self.d_.parameters():
-        #     if param.grad is not None:
-        #         torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-        # self.d_optim.step()
         self.d_scaler.scale(d_loss).backward()
         self.d_scaler.step(self.d_optim)
         self.d_scaler.update()
 
     def Gmain(self, data, pl_reg=False):
-        self.g_.requires_grad_with_freeze_(True)
+        self.g.requires_grad_(True)
         self.d.requires_grad_(False)
-        self.atten.requires_grad_(True)
 
-        z = torch.randn(data['heatmap'].shape[0], self.g_.z_dim, device=self.device)
+        z = torch.randn(data['human'].shape[0], self.g_.z_dim, device=self.device)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            fake_imgs, feats = self.g(z, data['heatmap'], return_feat_res=self.atten_.resolutions)
-
-            if self.cfg.ADA.enabled:
-                fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
-            fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
+            fake_imgs = self.g(z, face=data['face'], content=data['masked_face'])
+            fake = self.augment_pipe(fake_imgs['human']) if self.cfg.ADA.enabled else fake_imgs['human']
             fake_pred = self.d(fake)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
             loss_Gmain = loss_Gmain + gan_loss
 
-            # attention feature reconstruction loss
-            query_feats, out_feats = self.atten(feats, mask=data['quad_mask'])
-            for res in self.atten_.resolutions:
-                rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
-                self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
-                loss_Gmain = loss_Gmain + rec_loss
+            # reconstruction loss
+            loss_rec = self.rec_loss(data['masked_face'][:, :3, :, :], fake_imgs['human'], mask=data['masked_face'][:, 3:, :, :])
+            self.stats['loss/G-reconstruction'] = loss_rec.detach()
+            loss_Gmain = loss_Gmain + loss_rec
 
-        # self.g.zero_grad(set_to_none=True)
-        # self.g_scaler.scale(loss_Gmain).backward()
-        # self.g_scaler.step(self.g_optim)
-        # self.g_scaler.update()
-        if pl_reg:
-            cfg = self.cfg.TRAIN.PPL
-            pl_bs = max(1, self.batch_gpu // cfg.bs_shrink)
-            with autocast(enabled=self.autocast):
-                fake_imgs, _, ws = self.g(z[:pl_bs], data['heatmap'][:pl_bs], return_dlatent=pl_reg)
-                path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
-                    fake_imgs['face'],
-                    ws['face'],
-                    self.stats['mean_path_length'].detach()
-                )
-            loss_Gpl = path_loss * cfg.gain * cfg.every + 0 * fake_imgs['face'][0, 0, 0, 0]
-            self.stats['loss/PPL'] = path_loss.detach()
+            if pl_reg:
+                cfg = self.cfg.TRAIN.PPL
+                pl_bs = max(1, self.batch_gpu // cfg.bs_shrink)
+                with autocast(enabled=self.autocast):
+                    fake_imgs, ws = self.g(z[:pl_bs], face=data['face'][:pl_bs], content=data['masked_face'][:pl_bs], return_dlatent=True)
+                    path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
+                        fake_imgs['human'],
+                        ws['human'],
+                        self.stats['mean_path_length'].detach()
+                    )
+                loss_Gpl = path_loss * cfg.gain * cfg.every + 0 * fake_imgs['human'][0, 0, 0, 0]
+                self.stats['loss/PPL'] = path_loss.detach()
 
         g_loss = loss_Gmain + loss_Gpl
         self.g.zero_grad(set_to_none=True)
-        self.atten.zero_grad(set_to_none=True)
         self.g_scaler.scale(g_loss).backward()
         self.g_scaler.step(self.g_optim)
         self.g_scaler.update()
-        self.a_optim.step()
 
     def reduce_stats(self):
         """ Reduce all training stats to master for reporting. """
@@ -482,35 +458,35 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            self.val_ds.update_targets(["heatmap", "vis_kp", "quad_mask", "align_lm"])
+            self.val_ds.update_targets(["face", "masked_face", "human"])
             val_loader = torch.utils.data.DataLoader(
                 self.val_ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
                 sampler=self.get_sampler(self.val_ds, eval=True)
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(val_loader)).items()}
-            self.vis_kp = self.all_gather(self._samples['vis_kp'])
+            self.real_samples = {k: self.all_gather(v) for k, v in self._samples.items()}
+            _samples = [self.real_samples['face'], self.real_samples['masked_face'][:, :3, :, :], self.real_samples['human']]
+            samples = torch.stack(_samples, dim=1).flatten(0, 1)
+            save_image(
+                samples,
+                self.outdir / 'samples' / f'real.png',
+                nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
+                normalize=True,
+                value_range=(-1, 1),
+            )
 
-        z = torch.randn([self._samples['heatmap'].shape[0], self.g_ema.z_dim], device=self.device)
+        z = torch.randn([self.cfg.n_sample // self.num_gpus, self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
-            _fake_imgs, feats = self.g_ema(z, self._samples['heatmap'], return_feat_res=self.atten_.resolutions)
-            atten_out = self.atten(feats, self._samples['quad_mask'], self._samples['align_lm'], eval=True)
+            _fake_imgs = self.g_ema(z, face=self._samples['face'], content=self._samples['masked_face'])
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
             fake_imgs[cn] = self.all_gather(x)
-            if self.local_rank == 0:
-                assert fake_imgs[cn].shape[0] == self.cfg.n_sample
+            assert fake_imgs[cn].shape[0] == self.cfg.n_sample
 
         if self.local_rank == 0:
-            self.plot_attention(
-                self.outdir / 'samples' / f'fake-{i :06d}-atten.png',
-                _fake_imgs,
-                atten_out,
-                self._samples['align_lm']
-            )
-
-            _samples = [fake_imgs['face'], fake_imgs['human'], self.vis_kp]
+            _samples = [self.real_samples['face'], self.real_samples['masked_face'][:, :3, :, :], fake_imgs['human']]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
             save_image(
                 samples,

@@ -30,6 +30,7 @@ _C.MODEL.w_dim = 512
 _C.MODEL.mode = ''  # ['split', 'join']
 _C.MODEL.freeze_teacher = False
 _C.MODEL.teacher_weight = ''
+_C.MODEL.face_encoding_dim = 0
 
 _C.MODEL.MAPPING = CN()
 _C.MODEL.MAPPING.num_layers = 8
@@ -44,13 +45,17 @@ _C.MODEL.SYNTHESIS.pose_encoder_kwargs = CN(new_allowed=True)
 _C.MODEL.SYNTHESIS.pose_encoder_kwargs.name = 'DefaultPoseEncoder'
 _C.MODEL.SYNTHESIS.channel_base = 32768
 _C.MODEL.SYNTHESIS.channel_max = 512
+_C.MODEL.SYNTHESIS.use_content_encoder = False
+_C.MODEL.SYNTHESIS.content_encoder_kwargs = CN()
+_C.MODEL.SYNTHESIS.content_encoder_kwargs.nf_in = 3
+_C.MODEL.SYNTHESIS.content_encoder_kwargs.max_nf = 512
 
 _C.MODEL.ATTENTION = CN()
 _C.MODEL.ATTENTION.resolutions = []
 _C.MODEL.ATTENTION.feature_types = 'relu'
 
 _C.MODEL.DISCRIMINATOR = CN()
-_C.MODEL.DISCRIMINATOR.img_channels = 3
+_C.MODEL.DISCRIMINATOR.img_channels = [3]
 _C.MODEL.DISCRIMINATOR.branch_res = 64
 _C.MODEL.DISCRIMINATOR.top_res = 4
 _C.MODEL.DISCRIMINATOR.channel_base = 32768

@@ -5,13 +5,12 @@ __all__ = ['Generator', 'Discriminator', 'create_model', 'resume_teacherNet_from
 
 
 def create_model(cfg, device=None, eval_only=False):
-    g = Generator(
+    g = SFA(
         cfg.MODEL.z_dim,
         cfg.MODEL.w_dim,
         cfg.classes,
         cfg.resolution,
-        mode=cfg.MODEL.mode,
-        freeze_teacher=cfg.MODEL.freeze_teacher,
+        face_encoding_dim=cfg.MODEL.face_encoding_dim,
         mapping_kwargs=cfg.MODEL.MAPPING,
         synthesis_kwargs=dict(cfg.MODEL.SYNTHESIS),
     ).to(device)
@@ -19,9 +18,8 @@ def create_model(cfg, device=None, eval_only=False):
     if eval_only:
         return g.eval()
 
-    atten = AttentionNetwork(g.classes, g.channel_dict, **cfg.MODEL.ATTENTION).to(device)
     d = Discriminator(cfg.resolution, **cfg.MODEL.DISCRIMINATOR).to(device)
-    return g, d, atten
+    return g, d
 
 
 def map_keys(k):

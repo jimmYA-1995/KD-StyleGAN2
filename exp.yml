@@ -1,12 +1,10 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'FaceHuman-KD-attention'
+name: 'SFA'
 description: >
-    Default configuration for synthesis of face & human.
-    Apply maxpooling to face features(query), Separate Attention Network from Generator
+    Previous experiment for Style Face U-Net
 n_sample: 64
 resolution: 256
 classes:
-- 'face'
 - 'human'
 
 ADA:
@@ -30,9 +28,7 @@ DATASET:
 MODEL:
   z_dim: 512
   w_dim: 512
-  mode: 'joint'
-  freeze_teacher: false
-  teacher_weight: ''
+  face_encoding_dim: 112  # 400 + 112
 
   MAPPING:
     num_layers: 8
@@ -44,22 +40,21 @@ MODEL:
     img_channels: 3
     bottom_res: 4
     channel_base: 16384
-    pose_encoder_kwargs:
-      name: HeatmapEncoder
-      max_channels: 512
-      heatmap_size: 256
-      in_channels: 17
-
-  ATTENTION:
-    resolutions: [4, 8, 16, 32, 64, 128, 256]
-    feature_types: 'relu'
+    # pose_encoder_kwargs:
+    #   name: HeatmapEncoder
+    #   max_channels: 512
+    #   heatmap_size: 256
+    #   in_channels: 17
+    use_content_encoder: true
+    content_encoder_kwargs:
+      nf_in: 4
+      max_nf: 256
 
   DISCRIMINATOR:
-    img_channels: 3
+    img_channels: [3]
     branch_res: 256
     top_res: 4
     channel_base: 16384
-
 
 TRAIN:
   iteration: 5
