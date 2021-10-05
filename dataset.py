@@ -32,6 +32,21 @@ def get_dataset(cfg, **override_kwargs):
     return ds_cls(cfg, **override_kwargs)
 
 
+def get_sampler(ds, eval=False, num_gpus=1):
+    """ Using state to decide common dataloader kwargs. """
+    # TODO workers kwargs
+    assert ds.targets, "Please call ds.update_targets([desired_targets])"
+    if num_gpus > 1:
+        sampler = torch.utils.data.DistributedSampler(
+            ds, shuffle=(not eval), drop_last=(not eval))
+    elif not eval:
+        sampler = torch.utils.data.RandomSampler(ds)
+    else:
+        sampler = torch.utils.data.SequentialSampler(ds)
+
+    return sampler
+
+
 class DefaultDataset(data.Dataset):
     def __init__(self, cfg, split='train'):
         assert len(cfg.roots) == len(cfg.source) == 1

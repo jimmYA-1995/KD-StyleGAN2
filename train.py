@@ -19,10 +19,12 @@ import wandb
 
 from augment import AugmentPipe
 from config import *
-from dataset import get_dataset
+from dataset import get_dataset, get_sampler
+from generate import image_generator
 from losses import *
 from misc import *
 from models import *
+from metrics import *
 from torch_utils.misc import print_module_summary, constant
 
 
@@ -49,6 +51,8 @@ class Trainer():
         self.batch_gpu = cfg.TRAIN.batch_gpu
         self.start_iter = 0
         self.use_wandb = use_wandb
+        self.metrics = cfg.EVAL.metrics
+        self.fid_tracker = None
 
         # stats
         stat_keys = ['mean_path_length']
@@ -63,7 +67,7 @@ class Trainer():
             print(cfg)
 
         self.train_ds = get_dataset(cfg, split='train')
-        self.val_ds = get_dataset(cfg, split='test', xflip=False, num_items=cfg.n_sample)
+        self.val_ds = get_dataset(cfg, split='val', xflip=True)
         self._samples = None
 
         self.g, self.d = create_model(cfg, device=self.device)
@@ -86,8 +90,16 @@ class Trainer():
             imgs = print_module_summary(self.g, [z], face=face, content=masked_face)
             print_module_summary(self.d, [imgs[cfg.classes[0]]])
 
-        # if 'fid' in self.metrics:
-        #     self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
+        if 'fid' in self.metrics:
+            self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
+            self.infer_fn = functools.partial(
+                image_generator,
+                self.g_ema,
+                cfg.EVAL.batch_gpu,
+                ds=self.val_ds,
+                device=self.device,
+                num_gpus=self.num_gpus
+            )
 
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
@@ -214,20 +226,6 @@ class Trainer():
         self.run.log(self.wandb_stats, step=step)
         self.wandb_stats = dict()
 
-    def get_sampler(self, ds, eval=False):
-        """ Using state to decide common dataloader kwargs. """
-        # TODO workers kwargs
-        assert ds.targets, "Please call ds.update_targets([desired_targets])"
-        if self.num_gpus > 1:
-            sampler = torch.utils.data.DistributedSampler(
-                ds, shuffle=(not eval), drop_last=(not eval))
-        elif not eval:
-            sampler = torch.utils.data.RandomSampler(ds)
-        else:
-            sampler = torch.utils.data.SequentialSampler(ds)
-
-        return sampler
-
     def sample_forever(self, loader, pbar=False):
         """ Inifinite loader with optional progress bar. """
         # epoch value may incorrect if we resume training with different num_gpus to previous run.
@@ -315,7 +313,7 @@ class Trainer():
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
             batch_size=self.batch_gpu,
-            sampler=self.get_sampler(self.train_ds),
+            sampler=get_sampler(self.train_ds, num_gpus=self.num_gpus),
             num_workers=self.cfg.DATASET.num_workers,
             pin_memory=self.cfg.DATASET.pin_memory,
             persistent_workers=self.cfg.DATASET.num_workers > 0,
@@ -335,6 +333,10 @@ class Trainer():
             # FID
             if self.cfg.ADA.enabled and self.cfg.ADA.target > 0 and (i % self.cfg.ADA.interval == 0):
                 self.update_ada()
+
+            if self.fid_tracker is not None and (i == 0 or (i + 1) % self.cfg.EVAL.FID.every == 0):
+                fids = self.fid_tracker(self.g_ema.classes, self.infer_fn, (i + 1), save=(self.local_rank == 0))
+                self.stats.update({f'FID/{c}': torch.tensor(v, device=self.device) for c, v in fids.items()})
 
             if (i + 1) % self.cfg.TRAIN.CKPT.every == 0:
                 self.save_to_checkpoint(i + 1)
@@ -458,13 +460,14 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            self.val_ds.update_targets(["face", "masked_face", "human"])
-            val_loader = torch.utils.data.DataLoader(
-                self.val_ds,
+            ds = get_dataset(self.cfg, split='test', xflip=False, num_items=self.cfg.n_sample)
+            ds.update_targets(["face", "masked_face", "human"])
+            loader = torch.utils.data.DataLoader(
+                ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
-                sampler=self.get_sampler(self.val_ds, eval=True)
+                sampler=get_sampler(ds, eval=True, num_gpus=self.num_gpus)
             )
-            self._samples = {k: v.to(self.device) for k, v in next(iter(val_loader)).items()}
+            self._samples = {k: v.to(self.device) for k, v in next(iter(loader)).items()}
             self.real_samples = {k: self.all_gather(v) for k, v in self._samples.items()}
             _samples = [self.real_samples['face'], self.real_samples['masked_face'][:, :3, :, :], self.real_samples['human']]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)

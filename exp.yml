@@ -1,7 +1,7 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
 name: 'SFA'
 description: >
-    Previous experiment for Style Face U-Net
+    Reproduce experiment of Style Face U-Net on unalign_1.0 face
 n_sample: 64
 resolution: 256
 classes:
@@ -77,11 +77,12 @@ TRAIN:
 
 EVAL:
   metrics: ''
+  batch_gpu: 8
   FID:
     dataset: ''
-    every: 6250
-    batch_size: 8
+    every: 5
+    batch_gpu: 64
     n_sample: 50000
-    inception_cache: ''
+    inception_cache: 'inception_cache_DeepFashion_human27751_xflip.pkl'
     sample_dir: ''
 
