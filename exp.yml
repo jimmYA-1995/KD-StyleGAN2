@@ -55,8 +55,8 @@ MODEL:
     feature_types: 'relu'
 
   DISCRIMINATOR:
-    img_channels: 3
-    branch_res: 256
+    img_channels: [3, 3]
+    branch_res: 32
     top_res: 4
     channel_base: 16384
 
@@ -65,6 +65,7 @@ TRAIN:
   iteration: 5
   batch_gpu: 8
   lrate: 0.002
+  lrate_atten: 0.002
   R1:
     every: 16
     gamma: 10
@@ -81,12 +82,11 @@ TRAIN:
     every: 5
 
 EVAL:
-  metrics: ''
+  metrics: 'fid'
+  batch_gpu: 8
   FID:
-    dataset: ''
-    every: 6250
-    batch_size: 8
+    every: 5
+    batch_gpu: 64
     n_sample: 50000
     inception_cache: ''
-    sample_dir: ''
 

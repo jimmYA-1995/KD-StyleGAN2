@@ -60,7 +60,7 @@ def setup_logger(outdir, local_rank=0, debug=False):
         filename = outdir / f'log_{logger_name}.txt'
         plain_formatter = "%(levelname)-8s - %(asctime)-15s - %(message)s (%(filename)s:%(lineno)d)"
         fh = logging.StreamHandler(_cached_log_stream(filename))
-        fh.setLevel(getattr(logging, loglevel))
+        fh.setLevel(getattr(logging, 'INFO'))
         fh.setFormatter(logging.Formatter(plain_formatter))
         logger.addHandler(fh)
 
