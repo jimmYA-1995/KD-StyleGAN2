@@ -200,6 +200,7 @@ class Trainer():
         desc = cfg.pop('description')
         run = wandb.init(
             project=f'Research',
+            id=self.wandb_id,
             name=exp_name,
             config=cfg,
             notes=desc,
@@ -355,7 +356,7 @@ class Trainer():
         self.d.requires_grad_(True)
 
         loss_Dmain = loss_Dr1 = 0
-        real = self.augment_pipe(data['face']) if self.cfg.ADA.enabled else data['face']
+        real = self.augment_pipe(data['human']) if self.cfg.ADA.enabled else data['human']
         real = real.detach().requires_grad_(r1_reg)
         z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
