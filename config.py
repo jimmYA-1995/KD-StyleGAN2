@@ -50,7 +50,7 @@ _C.MODEL.ATTENTION.resolutions = []
 _C.MODEL.ATTENTION.feature_types = 'relu'
 
 _C.MODEL.DISCRIMINATOR = CN()
-_C.MODEL.DISCRIMINATOR.img_channels = 3
+_C.MODEL.DISCRIMINATOR.img_channels = [3]
 _C.MODEL.DISCRIMINATOR.branch_res = 64
 _C.MODEL.DISCRIMINATOR.top_res = 4
 _C.MODEL.DISCRIMINATOR.channel_base = 32768
@@ -65,6 +65,7 @@ _C.TRAIN = CN()
 _C.TRAIN.iteration = 80000
 _C.TRAIN.batch_gpu = 16
 _C.TRAIN.lrate = 0.002
+_C.TRAIN.lrate_atten = 0.002
 _C.TRAIN.PPL = CN()
 _C.TRAIN.PPL.gain = 2
 _C.TRAIN.PPL.bs_shrink = 2
@@ -104,13 +105,12 @@ _C.ADA.KWARGS.saturation = 1
 # ------ evaluation ------
 _C.EVAL = CN()
 _C.EVAL.metrics = ""
+_C.EVAL.batch_gpu = 16
 _C.EVAL.FID = CN()
-_C.EVAL.FID.dataset = ""
 _C.EVAL.FID.every = 0
-_C.EVAL.FID.batch_size = 32
+_C.EVAL.FID.batch_gpu = 32
 _C.EVAL.FID.n_sample = 50000
-_C.EVAL.FID.inception_cache = "inception_cache.pkl"
-_C.EVAL.FID.sample_dir = ""
+_C.EVAL.FID.inception_cache = ""
 
 
 def get_cfg_defaults():

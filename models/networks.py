@@ -312,7 +312,7 @@ class Discriminator(nn.Module):
     def __init__(
         self,
         img_resolution: int,
-        img_channels: int = 3,                     # img_channel for each class
+        img_channels: List[int] = [3],             # img_channel for each class. It will create a branch for each class
         branch_res: int = 64,                      # separate classes until res
         top_res: int = 4,
         channel_base: int = 32768,
@@ -324,10 +324,11 @@ class Discriminator(nn.Module):
     ):
         assert top_res < branch_res <= img_resolution
         super(Discriminator, self).__init__()
-        self.num_classes = 2  # fix num_class to 2
         mbstd_num_channels = 1
-        self.input_shape = [img_channels * self.num_classes, img_resolution, img_resolution]
+        self.input_shape = [None, sum(img_channels), img_resolution, img_resolution]
+        self.img_resolution = img_resolution
         self.img_channels = img_channels
+        self.num_classes = len(img_channels)
         self.branch_res = branch_res
         self.top_res = top_res
         self.mbstd_group_size = mbstd_group_size
@@ -336,13 +337,14 @@ class Discriminator(nn.Module):
         self.block_resolutions = [2 ** i for i in range(self.resolution_log2, int(np.log2(top_res)), -1)]
         channel_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [top_res]}
 
-        self.frgb_face = Conv2dLayer(self.img_channels, channel_dict[img_resolution], kernel_size=1)
-        self.frgb_human = Conv2dLayer(self.img_channels, channel_dict[img_resolution], kernel_size=1)
-        self.blocks = nn.ModuleList()
         for res in self.block_resolutions:
+            if res == img_resolution:
+                for i, img_channel in enumerate(img_channels):
+                    self.add_module(f'frgb_branch{i}', Conv2dLayer(img_channel, channel_dict[res], kernel_size=1))
+
             if res == branch_res:
                 merge_layer = Conv2dLayer(
-                    channel_dict[res] * 2,
+                    channel_dict[res] * len(img_channels),
                     channel_dict[res],
                     kernel_size=1,
                     use_bias=False,
@@ -352,8 +354,8 @@ class Discriminator(nn.Module):
                 self.add_module(f'b{res}_merge', merge_layer)
 
             if res > branch_res:
-                self.add_module(f'b{res}_face', DBlock(channel_dict[res], channel_dict[res // 2]))
-                self.add_module(f'b{res}_human', DBlock(channel_dict[res], channel_dict[res // 2]))
+                for i in range(self.num_classes):
+                    self.add_module(f'b{res}_branch{i}', DBlock(channel_dict[res], channel_dict[res // 2]))
             else:
                 self.add_module(f'b{res}', DBlock(channel_dict[res], channel_dict[res // 2]))
 
@@ -366,19 +368,19 @@ class Discriminator(nn.Module):
         self.joint_head = DenseLayer(channel_dict[top_res], 1)
 
     def forward(self, img):
-        assert_shape(img, [None, *self.input_shape])
-        face, human = torch.chunk(img, 2, dim=1)
-        cs = torch.eye(self.num_classes, device=face.device).unsqueeze(1).repeat(1, face.shape[0], 1).flatten(0, 1)  # [B * #class, c_dim]
-        face = self.frgb_face(face)
-        human = self.frgb_human(human)
+        assert_shape(img, self.input_shape)
+        imgs = torch.split(img, self.img_channels, dim=1)
+        # cs = torch.eye(self.num_classes, device=imgs[0].device).unsqueeze(1).repeat(1, imgs[0].shape[0], 1).flatten(0, 1)  # [B * #class, c_dim]
+
         x = None
         for res in self.block_resolutions:
+            if res == self.img_resolution:
+                branches = [getattr(self, f'frgb_branch{i}')(imgs[i]) for i in range(self.num_classes)]
             if res == self.branch_res:
-                x = getattr(self, f'b{res}_merge')(torch.cat([face, human], dim=1))
+                x = getattr(self, f'b{res}_merge')(torch.cat(branches, dim=1))
 
             if res > self.branch_res:
-                face = getattr(self, f'b{res}_face')(face)
-                human = getattr(self, f'b{res}_human')(human)
+                branches = [getattr(self, f'b{res}_branch{i}')(branches[i]) for i in range(self.num_classes)]
             else:
                 assert x is not None
                 x = getattr(self, f'b{res}')(x)

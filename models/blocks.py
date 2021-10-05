@@ -8,19 +8,37 @@ from torch_utils.ops import upfirdn2d
 
 
 @register("content")
-class ContentEncoder(nn.Module):
-    def __init__(self, res_in, res_out, nf_in=3, max_nf=512):
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        res_in,
+        res_out,
+        nf_in=3,
+        max_nf=512,
+        return_feats=False,  # Whether to return intermediate features like UNet structure
+        flatten=False,       # Whether to flatten output features
+        flatten_dim=None     # Output dimension of Flattened features
+    ):
         assert (res_in / res_out) % 2 == 0
-        super(ContentEncoder, self).__init__()
+        super(Encoder, self).__init__()
         num_layer = int(np.log2(res_in / res_out))
         self.num_layer = num_layer
+        self.out_channels = {}
+        self.return_feats = return_feats
+        self.flatten = flatten
 
         res = res_in
         for i in range(num_layer):
-            nf_out = min(2 ** (i + 7), max_nf)  # to get half channels from synthesis layers
+            nf_out = min(2 ** (i + 6), max_nf)  # to get half channels from synthesis layers
             res = res // 2
-            setattr(self, f'b{res}', Conv2dLayer(nf_in, nf_out, mode='down'))
+            setattr(self, f'b{res}', Conv2dLayer(nf_in, nf_out, mode='down', activation='lrelu'))
+            self.out_channels[res] = nf_out
             nf_in = nf_out
+
+        if flatten:
+            assert flatten is not None
+            self.conv_out = Conv2dLayer(nf_in, flatten_dim, kernel_size=1, use_bias=False)
+
         assert res == res_out, res
 
     def forward(self, x):
@@ -31,6 +49,10 @@ class ContentEncoder(nn.Module):
             conv_down = getattr(self, f'b{res}')
             x = conv_down(x)
             outs[f'b{res}'] = x
+
+        if self.flatten:
+            x = self.conv_out(x)
+            outs['flatten'] = nn.functional.adaptive_avg_pool2d(x, (1, 1))
 
         return outs
 

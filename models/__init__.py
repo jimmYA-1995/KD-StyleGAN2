@@ -19,7 +19,10 @@ def create_model(cfg, device=None, eval_only=False):
     if eval_only:
         return g.eval()
 
-    atten = AttentionNetwork(g.classes, g.channel_dict, **cfg.MODEL.ATTENTION).to(device)
+    if cfg.MODEL.ATTENTION.resolutions:
+        atten = AttentionNetwork(g.classes, g.channel_dict, **cfg.MODEL.ATTENTION).to(device)
+    else:
+        atten = None
     d = Discriminator(cfg.resolution, **cfg.MODEL.DISCRIMINATOR).to(device)
     return g, d, atten
 

@@ -8,6 +8,7 @@
 
 # import re
 # import contextlib
+import logging
 import numpy as np
 import torch
 import warnings
@@ -178,7 +179,7 @@ def profiled_function(fn):
 #----------------------------------------------------------------------------
 # Print summary table of module hierarchy.
 
-def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True, **input_kwargs):
+def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True, log=None, **input_kwargs):
     assert isinstance(module, torch.nn.Module)
     assert not isinstance(module, torch.jit.ScriptModule)
     assert isinstance(inputs, (tuple, list))
@@ -244,7 +245,10 @@ def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True, **i
     widths = [max(len(cell) for cell in column) for column in zip(*rows)]
     print()
     for row in rows:
-        print('  '.join(cell + ' ' * (width - len(cell)) for cell, width in zip(row, widths)))
+        msg = '  '.join(cell + ' ' * (width - len(cell)) for cell, width in zip(row, widths))
+        print(msg)
+        if log is not None:
+            log.info(msg)
     print()
     return outputs
 
