@@ -1,6 +1,7 @@
 import random
 import json
 import pickle
+from collections import namedtuple
 from pathlib import Path
 from typing import List, Set
 
@@ -98,6 +99,9 @@ class DefaultDataset(data.Dataset):
 
 @register
 class DeepFashion(data.Dataset):
+    FacePosition = namedtuple('FacePosition', 'X_mean X_std cx_mean cx_std cy_mean cy_std')
+    FacePosition.__qualname__ = "DeepFashion.FacePosition"
+
     @configurable()
     def __init__(
         self,
@@ -106,13 +110,14 @@ class DeepFashion(data.Dataset):
         sources: List[str] = None,
         split: str = 'all',
         xflip: bool = False,
-        num_items: int = float('inf')
+        num_items: int = float('inf'),
+        resampling: bool = False,  # Whether to resample face position when create masked face
     ):
         assert roots is not None and sources is not None
         self.classes = ["DF_face", "DF_human"]
         self.res = resolution
         self.xflip = xflip
-        # all targets: ['face', 'human', 'heatmap', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
+        # all targets: ['face', 'human', 'heatmap', 'masked_face', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
         self.available_targets = ['face', 'human', 'face_lm']
         self.mask_slice = (slice(16, 80), slice(96, 160))
         self.mask_size = (64, 64)
@@ -123,8 +128,10 @@ class DeepFashion(data.Dataset):
         self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
         self.fileIDs.sort()
 
-        # self.size = {"DF_face": self.__len__(), "DF_human": self.__len__()}
-        # self.labels = np.zeros((len(self),), dtype=int)
+        # statistics
+        self.big = DeepFashion.FacePosition(78.08, 11.18, 517.075, 26.655, 131.60, 24.41)
+        self.small = DeepFashion.FacePosition(44.56, 3.32, 517.075, 26.655, 100.36, 17.22)
+        self.rng = np.random.default_rng()
 
         self.src = sources[0]
         self.face_dir = root / self.src / 'face'
@@ -190,6 +197,26 @@ class DeepFashion(data.Dataset):
         if 'human' in self.targets:
             img = io.imread(self.human_dir / f'{fileID}.png')
             data['human'] = self.transform(img)
+
+        if 'masked_face' in self.targets:
+            assert 'face' in data, "require face targets to make masked_face"
+            # 4 channel masked face with face
+            dist = self.big if np.random.random() > 0.7 else self.small
+            x = self.rng.normal(loc=dist.X_mean, scale=dist.X_std, size=()) * 0.45
+            cx = self.rng.normal(loc=dist.cx_mean, scale=dist.cx_std, size=()) * (self.res / 1024)
+            cx = np.clip(cx, int(0.125 * self.res), int(0.875 * self.res))
+            cy = self.rng.normal(loc=dist.cy_mean, scale=dist.cy_std, size=()) * (self.res / 1024)
+            cx = np.clip(cx, 0, int(0.5 * self.res))
+            w = h = int(np.abs(x) * 2)
+            masked_face = torch.zeros_like(data['face'])
+            face = torch.nn.functional.interpolate(data['face'][None, ...], (w, h), mode='bicubic', align_corners=True)[0]
+            x1, y1 = int(max(cx - w / 2, 0)), int(max(cy - h / 2, 0))
+            x2, y2 = int(min(cx + w / 2, self.res)), int(min(cy + h / 2, self.res))
+            crop_face = face[:, (y1 - y2):, :(x2 - x1)] if y1 == 0 else face[:, :(y2 - y1), :(x2 - x1)]
+            masked_face[:, y1:y2, x1:x2] = crop_face
+            mask = torch.any(masked_face != 0, dim=0)
+
+            data['masked_face'] = torch.cat([masked_face, mask[None, ...]], dim=0)
 
         if 'heatmap' in self.targets or 'vis_kp' in self.targets:
             kp = pickle.load(open(self.kp_dir / f'{fileID}.pkl', 'rb'))[0][:, (1, 0, 2)]  # [K, (y, x, score)]

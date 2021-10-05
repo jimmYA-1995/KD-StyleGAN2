@@ -50,7 +50,7 @@ _C.MODEL.ATTENTION.resolutions = []
 _C.MODEL.ATTENTION.feature_types = 'relu'
 
 _C.MODEL.DISCRIMINATOR = CN()
-_C.MODEL.DISCRIMINATOR.img_channels = 3
+_C.MODEL.DISCRIMINATOR.img_channels = [3]
 _C.MODEL.DISCRIMINATOR.branch_res = 64
 _C.MODEL.DISCRIMINATOR.top_res = 4
 _C.MODEL.DISCRIMINATOR.channel_base = 32768

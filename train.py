@@ -77,6 +77,8 @@ class Trainer():
         self.g, self.d, self.atten = create_model(cfg, device=self.device)
         self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
 
+        self.rec_loss = MaskedRecLoss(mask=None, num_channels=1, device=self.device)
+
         # Define optimizers with Lazy regularizer
         g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1) if cfg.TRAIN.PPL.every != -1 else 1
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
@@ -332,7 +334,6 @@ class Trainer():
             worker_init_fn=self.train_ds.__class__.worker_init_fn if self.cfg.DATASET.num_workers > 0 else None
         )
         loader = self.sample_forever(train_loader, pbar=(self.local_rank == 0))
-        self.rec_loss = MaskedRecLoss(mask=None, num_channels=1, device=self.device)
 
         for i in range(self.start_iter, self.cfg.TRAIN.iteration):
             data = next(loader)
