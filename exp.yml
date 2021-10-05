@@ -82,10 +82,10 @@ TRAIN:
     every: 5
 
 EVAL:
-  metrics: ''
+  metrics: 'fid'
   batch_gpu: 8
   FID:
-    every: 6250
+    every: 5
     batch_gpu: 64
     n_sample: 50000
     inception_cache: ''
