@@ -105,13 +105,12 @@ _C.ADA.KWARGS.saturation = 1
 # ------ evaluation ------
 _C.EVAL = CN()
 _C.EVAL.metrics = ""
+_C.EVAL.batch_gpu = 16
 _C.EVAL.FID = CN()
-_C.EVAL.FID.dataset = ""
 _C.EVAL.FID.every = 0
-_C.EVAL.FID.batch_size = 32
+_C.EVAL.FID.batch_gpu = 32
 _C.EVAL.FID.n_sample = 50000
-_C.EVAL.FID.inception_cache = "inception_cache.pkl"
-_C.EVAL.FID.sample_dir = ""
+_C.EVAL.FID.inception_cache = ""
 
 
 def get_cfg_defaults():
