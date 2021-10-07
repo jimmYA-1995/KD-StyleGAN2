@@ -50,7 +50,8 @@ MODEL:
     feature_types: 'relu'
 
   DISCRIMINATOR:
-    img_channels: [3, 3]
+    img_channels: [3]
+    c_dim: 2
     branch_res: 32
     top_res: 4
     channel_base: 16384
