@@ -205,8 +205,8 @@ def subprocess_fn(rank, args, cfg, temp_dir):
         torch.cuda.set_device(rank)
         init_method = f"file://{os.path.join(temp_dir, '.torch_distributed_init')}"
         torch.distributed.init_process_group(backend='nccl', init_method=init_method, rank=rank, world_size=args.num_gpus)
-    args.local_rank = rank  # compatibility
-    setup_logger(**vars(args))
+
+    setup_logger(args.out_dir, rank, debug=args.debug)
     device = torch.device('cuda', rank) if args.num_gpus > 1 else 'cuda'
     fid_tracker = FIDTracker(cfg, rank, args.num_gpus, args.out_dir)
 
