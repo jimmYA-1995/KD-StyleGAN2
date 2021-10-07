@@ -119,8 +119,8 @@ class DeepFashion(data.Dataset):
         self.xflip = xflip
         # all targets: ['face', 'human', 'heatmap', 'masked_face', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
         self.available_targets = ['face', 'human', 'face_lm']
-        self.mask_slice = (slice(16, 80), slice(96, 160))
-        self.mask_size = (64, 64)
+        self.mask_slice = (slice(16, 48), slice(112, 144))
+        self.mask_size = (32, 32)
         self.targets = []
 
         root = Path(roots[0]).expanduser()
@@ -135,7 +135,7 @@ class DeepFashion(data.Dataset):
 
         self.src = sources[0]
         self.face_dir = root / self.src / 'face'
-        self.human_dir = root / f'r{self.res}' / 'fixed_face_position'
+        self.human_dir = root / f'r{self.res}' / 'fixedface_unalign1.0_0.125'
         self.kp_dir = root / 'kp_heatmaps/keypoints'
         self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
