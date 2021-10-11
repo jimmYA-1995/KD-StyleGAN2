@@ -18,8 +18,8 @@ class MappingNetwork(nn.Module):
     def __init__(
         self,
         z_dim: int,                      # Latent vector (Z) dimensionality.
+        c_dim: int,                      # Conditioning label (C) dimensionality, 0 = no label.
         w_dim: int,                      # Disentangled latent (W) dimensionality.
-        num_classes: int,                # Number of classes.
         num_layers: int = 8,             # Number of mapping layers.
         embed_dim: int = 512,            # Dimensionality of embbeding layers. Force to zero when num_classes = 1
         layer_dim: int = 512,            # Dimensionality of intermediate layers.
@@ -27,16 +27,17 @@ class MappingNetwork(nn.Module):
         activation='lrelu',              # activation for each layer except embedding(which is linear)
         normalize_latents: bool = True,  # Normalize latent vectors (Z) before feeding them to the mapping layers?
     ) -> nn.Module:
+        assert z_dim or c_dim
         super(MappingNetwork, self).__init__()
         # TODO: track W_avg & truncation cutoff
 
         self.z_dim = z_dim
-        self.num_classes = num_classes
+        self.c_dim = c_dim
         self.normalize_latents = normalize_latents
 
-        if num_classes > 1:
+        if c_dim > 0:
             # with bias, no learning rate multiplier
-            self.embed = DenseLayer(num_classes, embed_dim)
+            self.embed = DenseLayer(c_dim, embed_dim)
         else:
             embed_dim = 0
 
@@ -48,18 +49,19 @@ class MappingNetwork(nn.Module):
             in_dim = out_dim
         self.fc = nn.Sequential(*fc)
 
-    def forward(self, z, c=None, broadcast=None, normalize_z=True):
+    def forward(self, z, c, broadcast=None, normalize_z=True):
         # Normalize, Embed & Concat if needed
         x = None
         if self.z_dim > 0:
+            assert z is not None
             assert z.shape[1] == self.z_dim
             x = z
             if normalize_z:
                 x = normalize_2nd_moment(z)
 
-        if self.num_classes > 1:
-            assert z.shape[0] == c.shape[0], f"{z.shape} v.s {c.shape}"
-            assert c.shape[1] == self.num_classes
+        if self.c_dim > 0:
+            assert c is not None
+            assert c.shape[1] == self.c_dim
             y = normalize_2nd_moment(self.embed(c))  # .to(torch.float32)
             x = torch.cat([x, y], dim=1) if x is not None else y
 
@@ -167,13 +169,12 @@ class Generator(nn.Module):
 
         self.num_layers = int(np.log2(img_resolution)) * 2 - 2
 
-        mapping_args = (z_dim, w_dim)
         synthesis_args = (w_dim, img_resolution)
 
         if mode == 'joint':
             synthesis1 = SynthesisNetwork(*synthesis_args, pose=True, const=True, **synthesis_kwargs)
             self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
-            mapping1 = MappingNetwork(*mapping_args, num_classes=2, **mapping_kwargs)
+            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=2, w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping1]])
             self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis1]])
         else:
@@ -181,8 +182,8 @@ class Generator(nn.Module):
             synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
             synthesis2 = SynthesisNetwork(*synthesis_args, pose=True, **synthesis_kwargs)
             self.heatmap_shape = synthesis2.pose_encoder.heatmap_shape
-            mapping1 = MappingNetwork(*mapping_args, num_classes=1, **mapping_kwargs)
-            mapping2 = MappingNetwork(*mapping_args, num_classes=1, **mapping_kwargs)
+            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
+            mapping2 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping2]])
             self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis2]])
 
@@ -312,6 +313,7 @@ class Discriminator(nn.Module):
     def __init__(
         self,
         img_resolution: int,
+        c_dim: int = 0,                            # Conditioning label (C) dimensionality.
         img_channels: List[int] = [3],             # img_channel for each class. It will create a branch for each class
         branch_res: int = 64,                      # separate classes until res
         top_res: int = 4,
@@ -321,14 +323,15 @@ class Discriminator(nn.Module):
         mbstd_group_size: int = 4,
         mbstd_num_features: int = 1,
         resample_filter: List[int] = [1, 3, 3, 1],
+        mapping_kwargs: Dict = {}
     ):
         assert top_res < branch_res <= img_resolution
         super(Discriminator, self).__init__()
         mbstd_num_channels = 1
+        self.c_dim = c_dim
         self.input_shape = [None, sum(img_channels), img_resolution, img_resolution]
         self.img_resolution = img_resolution
         self.img_channels = img_channels
-        self.num_classes = len(img_channels)
         self.branch_res = branch_res
         self.top_res = top_res
         self.mbstd_group_size = mbstd_group_size
@@ -337,12 +340,21 @@ class Discriminator(nn.Module):
         self.block_resolutions = [2 ** i for i in range(self.resolution_log2, int(np.log2(top_res)), -1)]
         channel_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [top_res]}
 
+        if cmap_dim is None:
+            cmap_dim = channel_dict[top_res]
+        if c_dim == 0:
+            # disable conditional Discriminator
+            cmap_dim = 0
+        else:
+            assert len(img_channels) == 1, "conditional branch D. is invalid"
+        self.cmap_dim = cmap_dim
+
         for res in self.block_resolutions:
             if res == img_resolution:
                 for i, img_channel in enumerate(img_channels):
                     self.add_module(f'frgb_branch{i}', Conv2dLayer(img_channel, channel_dict[res], kernel_size=1))
 
-            if res == branch_res:
+            if res == branch_res and len(img_channels) > 1:
                 merge_layer = Conv2dLayer(
                     channel_dict[res] * len(img_channels),
                     channel_dict[res],
@@ -354,41 +366,47 @@ class Discriminator(nn.Module):
                 self.add_module(f'b{res}_merge', merge_layer)
 
             if res > branch_res:
-                for i in range(self.num_classes):
+                for i in range(len(self.img_channels)):
                     self.add_module(f'b{res}_branch{i}', DBlock(channel_dict[res], channel_dict[res // 2]))
             else:
                 self.add_module(f'b{res}', DBlock(channel_dict[res], channel_dict[res // 2]))
 
         # output layer
-        # if self.num_classes > 1:
-        #     self.mapping = MappingNetwork(0, cmap_dim, self.num_classes,)
+        if c_dim > 0:
+            # mapping_kwargs.update(dict(w_avg=None))
+            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, **mapping_kwargs)
+
         self.conv_out = Conv2dLayer(channel_dict[top_res] + mbstd_num_channels, channel_dict[top_res], activation='lrelu')
         self.fc = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
-        # self.condition_head = DenseLayer(channel_dict[top_res], self.num_classes)
-        self.joint_head = DenseLayer(channel_dict[top_res], 1)
+        self.out = DenseLayer(channel_dict[top_res], 1 if cmap_dim == 0 else cmap_dim)
 
-    def forward(self, img):
+    def forward(self, img, c=None):
         assert_shape(img, self.input_shape)
         imgs = torch.split(img, self.img_channels, dim=1)
-        # cs = torch.eye(self.num_classes, device=imgs[0].device).unsqueeze(1).repeat(1, imgs[0].shape[0], 1).flatten(0, 1)  # [B * #class, c_dim]
 
-        x = None
+        x = cmap = None
         for res in self.block_resolutions:
             if res == self.img_resolution:
-                branches = [getattr(self, f'frgb_branch{i}')(imgs[i]) for i in range(self.num_classes)]
+                branches = [getattr(self, f'frgb_branch{i}')(imgs[i]) for i in range(len(self.img_channels))]
             if res == self.branch_res:
-                x = getattr(self, f'b{res}_merge')(torch.cat(branches, dim=1))
+                x = branches[0] if len(self.img_channels) == 1 else getattr(self, f'b{res}_merge')(torch.cat(branches, dim=1))
 
             if res > self.branch_res:
-                branches = [getattr(self, f'b{res}_branch{i}')(branches[i]) for i in range(self.num_classes)]
+                branches = [getattr(self, f'b{res}_branch{i}')(branches[i]) for i in range(len(self.img_channels))]
             else:
                 assert x is not None
                 x = getattr(self, f'b{res}')(x)
+
+        if self.c_dim > 0:
+            cmap = self.mapping(None, c)
 
         # Top res : 4x4
         x = minibatch_stddev_layer(x, self.mbstd_group_size, self.mbstd_num_features)
         x = self.conv_out(x)
         x = self.fc(x.flatten(1))
-        joint_out = self.joint_head(x)
+        x = self.out(x)
 
-        return joint_out
+        if cmap is not None:
+            x = (x * cmap).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim))
+
+        return x  # flaot32

@@ -50,6 +50,7 @@ _C.MODEL.ATTENTION.resolutions = []
 _C.MODEL.ATTENTION.feature_types = 'relu'
 
 _C.MODEL.DISCRIMINATOR = CN()
+_C.MODEL.DISCRIMINATOR.c_dim = 0  # c_dim > 0: must equals to len(classes) and len(img_channels) == 1
 _C.MODEL.DISCRIMINATOR.img_channels = [3]
 _C.MODEL.DISCRIMINATOR.branch_res = 64
 _C.MODEL.DISCRIMINATOR.top_res = 4

@@ -56,6 +56,7 @@ MODEL:
 
   DISCRIMINATOR:
     img_channels: [3, 3]
+    c_dim: 0
     branch_res: 32
     top_res: 4
     channel_base: 16384
