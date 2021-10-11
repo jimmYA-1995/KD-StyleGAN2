@@ -40,6 +40,7 @@ _C.MODEL.MAPPING.lrmul = 0.01
 _C.MODEL.SYNTHESIS = CN()
 _C.MODEL.SYNTHESIS.img_channels = 3
 _C.MODEL.SYNTHESIS.bottom_res = 4
+# _C.MODEL.SYNTHESIS.aspect_ratio = 1.0
 _C.MODEL.SYNTHESIS.pose_encoder_kwargs = CN(new_allowed=True)
 _C.MODEL.SYNTHESIS.pose_encoder_kwargs.name = 'DefaultPoseEncoder'
 _C.MODEL.SYNTHESIS.channel_base = 32768

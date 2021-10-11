@@ -29,7 +29,6 @@ class MappingNetwork(nn.Module):
     ) -> nn.Module:
         assert z_dim or c_dim
         super(MappingNetwork, self).__init__()
-        # TODO: track W_avg & truncation cutoff
 
         self.z_dim = z_dim
         self.c_dim = c_dim
@@ -77,9 +76,10 @@ class SynthesisNetwork(nn.Module):
     def __init__(
         self,
         w_dim: int,                        # Disentangled latent (W) dimensionality.
-        img_resolution: int,               # Output resolution
+        img_resolution: int,               # Output resolution. short side when output is rectangle(H:W = 3:2)
         img_channels: int = 3,             # Number of output color channels.
         bottom_res: int = 4,               # Resolution of bottom layer
+        aspect_ratio: int = 1.0,           # Aspect ratio of H to W of output.
         pose: bool = False,                # Whether to build Pose Encoder
         const: bool = False,               # Whether to create const inputs
         pose_encoder_kwargs: dict = {},    # Kwargs for Pose Encoder when using pose encoder
@@ -95,6 +95,7 @@ class SynthesisNetwork(nn.Module):
         self.img_resolution = img_resolution
         self.img_channels = img_channels
         self.bottom_res = bottom_res
+        self.aspect_ratio = aspect_ratio
         self.pose = pose
         self.num_blocks = int(np.log2(img_resolution // bottom_res)) + 1
         self.block_resolutions = [bottom_res * 2 ** i for i in range(self.num_blocks)]
@@ -104,7 +105,7 @@ class SynthesisNetwork(nn.Module):
         if pose:
             self.pose_encoder = build_pose_encoder(bottom_res, self.channel_dict[bottom_res], **pose_encoder_kwargs)
         if const:
-            self.const = nn.Parameter(torch.randn([self.channel_dict[bottom_res], bottom_res, bottom_res]))
+            self.const = nn.Parameter(torch.randn([self.channel_dict[bottom_res], int(bottom_res * aspect_ratio), bottom_res]))
 
         for res in self.block_resolutions:
             out_channels = self.channel_dict[res]
@@ -116,14 +117,18 @@ class SynthesisNetwork(nn.Module):
             self.add_module(f'b{res}_conv', SynthesisLayer(out_channels, out_channels, w_dim, res, resample_filter=resample_filter))
             self.add_module(f'b{res}_trgb', ToRGB(out_channels, img_channels, w_dim, resample_filter=resample_filter))
 
-    def forward(self, ws, pose=None, return_feat_res=None, **layer_kwargs):
+    def forward(self, ws, pose=None, square=False, return_feat_res=None, **layer_kwargs):
         assert return_feat_res is None or isinstance(return_feat_res, list)
         if pose is not None:
             assert self.pose
             assert pose.shape[0] == ws.shape[0], f"{pose.shape[0]} v.s {ws.shape[0]}"
             btm_features = self.pose_encoder(pose)
         else:
-            btm_features = self.const.unsqueeze(0).repeat(ws.shape[0], 1, 1, 1)
+            const = self.const
+            if square:
+                assert self.aspect_ratio > 1
+                const = const[:, :self.bottom_res, :]
+            btm_features = const.unsqueeze(0).repeat(ws.shape[0], 1, 1, 1)
 
         x = btm_features
         img = None
@@ -172,7 +177,7 @@ class Generator(nn.Module):
         synthesis_args = (w_dim, img_resolution)
 
         if mode == 'joint':
-            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
+            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, aspect_ratio=1.5, **synthesis_kwargs)
             # self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
             mapping1 = MappingNetwork(z_dim=z_dim, c_dim=2, w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping1]])
@@ -180,7 +185,7 @@ class Generator(nn.Module):
         else:
             # 1: teacher Network, 2: student Network
             synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
-            synthesis2 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
+            synthesis2 = SynthesisNetwork(*synthesis_args, const=True, aspect_ratio=1.5, **synthesis_kwargs)
             # self.heatmap_shape = synthesis2.pose_encoder.heatmap_shape
             mapping1 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
             mapping2 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
@@ -207,8 +212,8 @@ class Generator(nn.Module):
                 ws[class_name] = mapping(z, broadcast=self.num_layers, normalize_z=False)
 
         img, feats = {}, {}
-        for class_name, synthesis, p in zip(self.classes, self.synthesis.values(), (None, pose)):
-            img[class_name], feats[class_name] = synthesis(ws[class_name], pose=p, **synthesis_kwargs)
+        for class_name, synthesis, p, s in zip(self.classes, self.synthesis.values(), (None, pose), (True, None)):
+            img[class_name], feats[class_name] = synthesis(ws[class_name], pose=p, square=s, **synthesis_kwargs)
 
         if return_dlatent:
             return img, feats, ws

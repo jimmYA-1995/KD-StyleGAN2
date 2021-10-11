@@ -42,6 +42,7 @@ MODEL:
   
   SYNTHESIS:
     img_channels: 3
+    # aspect_ratio: 1.5
     bottom_res: 4
     channel_base: 16384
 
