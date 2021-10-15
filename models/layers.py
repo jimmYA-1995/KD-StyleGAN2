@@ -167,6 +167,7 @@ class SynthesisLayer(nn.Module):
         resolution,
         kernel_size=3,
         up=1,
+        aspect_ratio=1.0,
         resample_filter=[1, 3, 3, 1],    # Low-pass filter to apply when resampling activations.
         use_noise=True,
         activation='lrelu',
@@ -178,6 +179,7 @@ class SynthesisLayer(nn.Module):
         self.activation = activation
         self.w_dim = w_dim
         self.up = up
+        self.aspect_ratio = aspect_ratio
         self.padding = kernel_size // 2
         self.register_buffer('resample_filter', upfirdn2d.setup_filter(resample_filter))
         self.conv_clamp = conv_clamp
@@ -194,7 +196,7 @@ class SynthesisLayer(nn.Module):
         self.act_gain = bias_act.activation_funcs[activation].def_gain
 
         if use_noise:
-            self.register_buffer('noise_const', torch.randn([resolution, resolution]))  # only used by G_ema
+            self.register_buffer('noise_const', torch.randn([int(resolution * aspect_ratio), resolution]))  # only used by G_ema
             self.noise_strength = nn.Parameter(torch.zeros([]))
 
     def __repr__(self):
@@ -202,7 +204,6 @@ class SynthesisLayer(nn.Module):
 
     def forward(self, x, w, noise_mode='random', gain=1):
         assert noise_mode in ['random', 'const']
-        assert x.shape[1:] == self.input_shape[1:]
 
         styles = self.affine(w)
 
@@ -210,9 +211,11 @@ class SynthesisLayer(nn.Module):
         x = modulated_conv2d(x, self.weight, styles, up=self.up, padding=self.padding, resample_filter=self.resample_filter, flip_weight=flip_weight)
 
         if self.use_noise:
-            noise = self.noise_const if noise_mode == 'const' else torch.randn([x.shape[0], 1, *self.output_shape[2:]], device=x.device)
-            noise = noise * self.noise_strength
-            x = x.add_(noise)
+            if noise_mode == 'const':
+                noise = self.noise_const[:, :x.shape[2]]
+            else:
+                noise = torch.randn([x.shape[0], 1, *x.shape[2:]], device=x.device)
+            x = x.add_(noise * self.noise_strength)
 
         act_gain = self.act_gain * gain
         act_clamp = self.conv_clamp * gain if self.conv_clamp is not None else None

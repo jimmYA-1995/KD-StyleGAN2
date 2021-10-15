@@ -112,9 +112,9 @@ class SynthesisNetwork(nn.Module):
 
             if res > bottom_res:
                 in_channels = self.channel_dict[res // 2]
-                self.add_module(f'b{res}_convUp', SynthesisLayer(in_channels, out_channels, w_dim, res, up=2, resample_filter=resample_filter))
+                self.add_module(f'b{res}_convUp', SynthesisLayer(in_channels, out_channels, w_dim, res, up=2, aspect_ratio=aspect_ratio, resample_filter=resample_filter))
 
-            self.add_module(f'b{res}_conv', SynthesisLayer(out_channels, out_channels, w_dim, res, resample_filter=resample_filter))
+            self.add_module(f'b{res}_conv', SynthesisLayer(out_channels, out_channels, w_dim, res, aspect_ratio=aspect_ratio, resample_filter=resample_filter))
             self.add_module(f'b{res}_trgb', ToRGB(out_channels, img_channels, w_dim, resample_filter=resample_filter))
 
     def forward(self, ws, pose=None, square=False, return_feat_res=None, **layer_kwargs):
@@ -179,7 +179,7 @@ class Generator(nn.Module):
         if mode == 'joint':
             synthesis1 = SynthesisNetwork(*synthesis_args, const=True, aspect_ratio=1.5, **synthesis_kwargs)
             # self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
-            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=2, w_dim=w_dim, **mapping_kwargs)
+            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=1, w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping1]])
             self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis1]])
         else:
@@ -196,20 +196,15 @@ class Generator(nn.Module):
         self.block_resolutions = synthesis1.block_resolutions
         self.channel_dict = synthesis1.channel_dict
 
-    def forward(self, z, pose, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
+    def forward(self, z, c, pose, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
         # TODO enable style mixing training
         assert z.shape[1] == self.z_dim
         z = normalize_2nd_moment(z.to(torch.float32))
 
-        if self.mode == 'joint':
-            c = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
-            z = z.repeat(2, 1)
-            ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(2)
-            ws = {class_name: w for class_name, w in zip(self.classes, ws)}
-        else:  # split
-            ws = {}
-            for class_name, mapping in self.mapping.items():
-                ws[class_name] = mapping(z, broadcast=self.num_layers, normalize_z=False)
+        c = torch.cat([torch.ones([c.shape[0], 1], device=z.device), c], dim=0)  # Concat with face which ratio is 1
+        z = z.repeat(2, 1)
+        ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(2)
+        ws = {class_name: w for class_name, w in zip(self.classes, ws)}
 
         img, feats = {}, {}
         for class_name, synthesis, p, s in zip(self.classes, self.synthesis.values(), (None, pose), (True, None)):
@@ -386,7 +381,6 @@ class Discriminator(nn.Module):
         self.out = DenseLayer(channel_dict[top_res], 1 if cmap_dim == 0 else cmap_dim)
 
     def forward(self, img, c=None):
-        assert_shape(img, self.input_shape)
         imgs = torch.split(img, self.img_channels, dim=1)
 
         x = cmap = None
