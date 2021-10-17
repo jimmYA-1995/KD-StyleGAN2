@@ -121,7 +121,7 @@ class DeepFashion(data.Dataset):
         self.targets = []
 
         root = Path(roots[0]).expanduser()
-        split_map = pickle.load(open(root / 'new_split.pkl', 'rb'))
+        split_map = pickle.load(open(root / 'split.pkl', 'rb'))
         self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
         self.fileIDs.sort()
 

@@ -209,11 +209,14 @@ def subprocess_fn(rank, args, cfg, temp_dir):
     setup_logger(args.out_dir, rank, debug=args.debug)
     device = torch.device('cuda', rank) if args.num_gpus > 1 else 'cuda'
     fid_tracker = FIDTracker(cfg, rank, args.num_gpus, args.out_dir)
-
-    if args.ckpt is None:
-        if rank == 0:
-            print("only get statistics on real data. return...")
-        return
+    g = create_model(cfg, device=device, eval_only=True)
+    infer_fn = partial(image_generator, g, cfg.EVAL.batch_gpu, ds=None, device=device, num_gpus=args.num_gpus)
+    fid_tracker(g.classes, infer_fn, 0, save=args.save)
+    return
+    # if args.ckpt is None:
+    #     if rank == 0:
+    #         print("only get statistics on real data. return...")
+    #     return
 
     val_ds = None  # get_dataset(cfg, split='val', xflip=True)
     args.ckpt = Path(args.ckpt)

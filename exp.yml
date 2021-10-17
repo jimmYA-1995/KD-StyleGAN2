@@ -89,5 +89,5 @@ EVAL:
     every: 5
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: ''
+    inception_cache: '/tmp/inception_cache.pkl'
 
