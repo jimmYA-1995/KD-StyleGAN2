@@ -289,6 +289,20 @@ class Trainer():
 
             if key == 'stats':
                 self.stats.update(value)
+            elif key == 'd':
+                obj.load_state_dict(value, strict=False)
+                obj.requires_grad_(False)
+                obj.mapping.weight.copy_(value['mapping.embed.weight'])
+                obj.mapping.bias.copy_(value['mapping.embed.bias'])
+                obj.requires_grad_(True)
+            elif key == 'd_optim':
+                for i in range(34, 56):
+                    if i >= 50:
+                        value['state'][i - 16] = value['state'][i]
+                    else:
+                        del value['state'][i]
+                value['param_groups'][0]['params'] = list(range(40))
+                obj.load_state_dict(value)
             else:
                 obj.load_state_dict(value)
 
