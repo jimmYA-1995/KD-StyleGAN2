@@ -124,7 +124,7 @@ class DeepFashion(data.Dataset):
         self.targets = []
 
         root = Path(roots[0]).expanduser()
-        split_map = pickle.load(open(root / 'new_split.pkl', 'rb'))
+        split_map = pickle.load(open(root / 'split.pkl', 'rb'))
         self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
         self.fileIDs.sort()
 
@@ -135,7 +135,7 @@ class DeepFashion(data.Dataset):
 
         self.src = sources[0]
         self.face_dir = root / self.src / 'face'
-        self.human_dir = root / f'r{self.res}' / 'fixed_face_position'
+        self.human_dir = root / f'r{self.res}' / 'fixedface_unalign1.0_0.25'
         self.kp_dir = root / 'kp_heatmaps/keypoints'
         self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
