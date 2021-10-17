@@ -209,7 +209,7 @@ class Trainer():
         exp_name = cfg.pop('name')
         desc = cfg.pop('description')
         run = wandb.init(
-            project=f'FaceHuman-KD_attention-fixed_face_pos',
+            project=f'condD-broken',
             id=self.wandb_id,
             name=exp_name,
             config=cfg,
@@ -385,10 +385,12 @@ class Trainer():
                 c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
 
             fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
-            real_pred = self.d(real, c=c)
-            fake_pred = self.d(fake, c=c)
+            real_pred, real_embed_diff = self.d(real, c=c)
+            fake_pred, fake_embed_diff = self.d(fake, c=c)
             real_loss = torch.nn.functional.softplus(-real_pred).mean()
             fake_loss = torch.nn.functional.softplus(fake_pred).mean()
+            self.stats['Embed-Diff-Norm/Real'] = torch.linalg.norm(real_embed_diff.detach(), dim=1).mean()
+            self.stats['Embed-Diff-Norm/Fake'] = torch.linalg.norm(fake_embed_diff.detach(), dim=1).mean()
             self.stats[f"D-Real-Score"] = real_pred.mean().detach()
             self.stats[f"D-Fake-Score"] = fake_pred.mean().detach()
             self.stats[f"loss/D-Real"] = real_loss.detach()
@@ -439,7 +441,7 @@ class Trainer():
                 c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
 
             fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
-            fake_pred = self.d(fake, c=c)
+            fake_pred, _ = self.d(fake, c=c)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
             loss_Gmain = loss_Gmain + gan_loss
