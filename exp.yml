@@ -1,7 +1,8 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'condD-reproduce'
+name: 'Dbr-atten'
 description: >
-    fixed face position. reproduce training broken when using vanilla conditional D.
+    Default configuration for synthesis of face & human.
+    fixed face position. with reconstruction loss
 n_sample: 64
 resolution: 256
 classes:
@@ -23,7 +24,7 @@ DATASET:
   sources:
     - 'unalign_1.0'
   xflip: true
-  num_workers: 4
+  num_workers: 0
   pin_memory: true
 
 MODEL:
@@ -46,7 +47,7 @@ MODEL:
 
   ATTENTION:
     resolutions: []
-    feature_types: 'favor+'
+    feature_types: 'relu'
 
   DISCRIMINATOR:
     img_channels: [3]
@@ -57,7 +58,7 @@ MODEL:
 
 
 TRAIN:
-  iteration: 100000
+  iteration: 5
   batch_gpu: 8
   lrate: 0.002
   lrate_atten: 0.002
@@ -70,17 +71,17 @@ TRAIN:
     bs_shrink: 2
   style_mixing_prob: 0.0
   CKPT:
-    path: 'results/00040-3nt4qpob-4gpu-condD-1-0.25/checkpoints/ckpt-043750.pt'
-    every: 6250
+    path: ''
+    every: 5
     max_keep: -1
   SAMPLE:
-    every: 6250
+    every: 5
 
 EVAL:
   metrics: 'fid'
   batch_gpu: 8
   FID:
-    every: 6250
+    every: 5
     batch_gpu: 64
     n_sample: 50000
     inception_cache: ''

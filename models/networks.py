@@ -374,7 +374,7 @@ class Discriminator(nn.Module):
         # output layer
         if c_dim > 0:
             # mapping_kwargs.update(dict(w_avg=None))
-            self.mapping = DenseLayer(c_dim, cmap_dim)
+            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, **mapping_kwargs)
 
         self.conv_out = Conv2dLayer(channel_dict[top_res] + mbstd_num_channels, channel_dict[top_res], activation='lrelu')
         self.fc = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
@@ -397,11 +397,8 @@ class Discriminator(nn.Module):
                 assert x is not None
                 x = getattr(self, f'b{res}')(x)
 
-        embed_diff = None
         if self.c_dim > 0:
-            cmap = self.mapping(c)
-            face_embed, human_embed = torch.chunk(cmap, 2, dim=0)
-            embed_diff = face_embed - human_embed
+            cmap = self.mapping(None, c)
 
         # Top res : 4x4
         x = minibatch_stddev_layer(x, self.mbstd_group_size, self.mbstd_num_features)
@@ -412,4 +409,4 @@ class Discriminator(nn.Module):
         if cmap is not None:
             x = (x * cmap).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim))
 
-        return x, embed_diff  # flaot32
+        return x  # flaot32
