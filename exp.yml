@@ -22,7 +22,8 @@ DATASET:
   roots:
     - '~/data/deepfashion'
   sources:
-    - 'unalign_1.0'
+    - 'unalign_1.0'                 # directory of face image
+    - 'fixedface_unalign1.0_0.125'  # subdirectory of human image
   xflip: true
   num_workers: 0
   pin_memory: true

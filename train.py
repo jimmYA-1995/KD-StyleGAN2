@@ -371,6 +371,7 @@ class Trainer():
         loss_Dmain = loss_Dr1 = 0
         if self.cfg.ADA.enabled:
             data['face'] = self.augment_pipe(data['face'])
+            data['human'] = self.augment_pipe(data['human'])
         real = torch.cat([data['face'], data['human']], dim=0 if self.d_.c_dim > 0 else 1).detach().requires_grad_(r1_reg)
 
         z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)

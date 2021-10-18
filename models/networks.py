@@ -379,7 +379,7 @@ class Discriminator(nn.Module):
 
         self.conv_out = Conv2dLayer(channel_dict[top_res] + mbstd_num_channels, channel_dict[top_res], activation='lrelu')
         self.fc = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
-        self.out = DenseLayer(channel_dict[top_res], 1 if cmap_dim == 0 else cmap_dim)
+        self.joint_head = DenseLayer(channel_dict[top_res], 1 if cmap_dim == 0 else cmap_dim)
 
     def forward(self, img, c=None):
         assert_shape(img, self.input_shape)
@@ -405,7 +405,7 @@ class Discriminator(nn.Module):
         x = minibatch_stddev_layer(x, self.mbstd_group_size, self.mbstd_num_features)
         x = self.conv_out(x)
         x = self.fc(x.flatten(1))
-        x = self.out(x)
+        x = self.joint_head(x)
 
         if cmap is not None:
             x = (x * cmap).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim))
