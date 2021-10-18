@@ -214,14 +214,15 @@ class Generator(nn.Module):
             return img, feats, ws
         return img, feats
 
-    def inference(self, z, pose):
-        """ forward only through target class(i.e. human) """
+    @torch.no_grad()
+    def inference(self, z, pose, target_class):
+        """ forward only through target class"""
         assert z.shape[1] == self.z_dim
         c = None
         if self.mode == 'joint':
-            c = torch.eye(len(self.classes))[-1:].repeat(z.shape[0], 1)  # target class is last
-        w = self.mapping[self.classes[1]](z, c=c, broadcast=self.num_layers)
-        img, _ = self.synthesis[self.classes[1]](w, pose=pose)
+            c = torch.eye(len(self.classes), device=z.device)[self.classes.index(target_class)][None, ...].repeat(z.shape[0], 1)
+        w = self.mapping[target_class](z, c=c, broadcast=self.num_layers)
+        img, _ = self.synthesis[target_class](w, pose=pose)
         return img
 
     def requires_grad_with_freeze_(self, requires_grad: bool) -> None:
@@ -378,7 +379,7 @@ class Discriminator(nn.Module):
 
         self.conv_out = Conv2dLayer(channel_dict[top_res] + mbstd_num_channels, channel_dict[top_res], activation='lrelu')
         self.fc = DenseLayer(channel_dict[top_res] * top_res * top_res, channel_dict[top_res], activation='lrelu')
-        self.out = DenseLayer(channel_dict[top_res], 1 if cmap_dim == 0 else cmap_dim)
+        self.joint_head = DenseLayer(channel_dict[top_res], 1 if cmap_dim == 0 else cmap_dim)
 
     def forward(self, img, c=None):
         assert_shape(img, self.input_shape)
@@ -404,7 +405,7 @@ class Discriminator(nn.Module):
         x = minibatch_stddev_layer(x, self.mbstd_group_size, self.mbstd_num_features)
         x = self.conv_out(x)
         x = self.fc(x.flatten(1))
-        x = self.out(x)
+        x = self.joint_head(x)
 
         if cmap is not None:
             x = (x * cmap).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim))

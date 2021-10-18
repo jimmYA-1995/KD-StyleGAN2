@@ -366,16 +366,23 @@ class Trainer():
         loss_Dmain = loss_Dr1 = 0
         if self.cfg.ADA.enabled:
             data['face'] = self.augment_pipe(data['face'])
-        real = torch.cat([data['face'], data['human']], dim=1).detach().requires_grad_(r1_reg)
+            data['human'] = self.augment_pipe(data['human'])
+
+        real = torch.cat([data['face'], data['human']], dim=0 if self.d_.c_dim > 0 else 1).detach().requires_grad_(r1_reg)
         z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
             fake_imgs, _ = self.g(z, data['heatmap'])
-            if self.cfg.ADA.enabled:
-                fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
-            fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
+            aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
+                             for k, v in fake_imgs.items()}
 
-            real_pred = self.d(real)
-            fake_pred = self.d(fake)
+            cat_dim, c = 1, None
+            if self.d_.c_dim > 0:
+                cat_dim = 0
+                c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+
+            fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
+            real_pred = self.d(real, c=c)
+            fake_pred = self.d(fake, c=c)
             real_loss = torch.nn.functional.softplus(-real_pred).mean()
             fake_loss = torch.nn.functional.softplus(fake_pred).mean()
             self.stats[f"D-Real-Score"] = real_pred.mean().detach()
@@ -420,10 +427,15 @@ class Trainer():
             return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
             fake_imgs, feats = self.g(z, data['heatmap'], return_feat_res=return_feat_res)
 
-            if self.cfg.ADA.enabled:
-                fake_imgs['face'] = self.augment_pipe(fake_imgs['face'])
-            fake = torch.cat([fake_imgs['face'], fake_imgs['human']], dim=1)
-            fake_pred = self.d(fake)
+            aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
+                             for k, v in fake_imgs.items()}
+            cat_dim, c = 1, None
+            if self.d_.c_dim > 0:
+                cat_dim = 0
+                c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+
+            fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
+            fake_pred = self.d(fake, c=c)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
             loss_Gmain = loss_Gmain + gan_loss
