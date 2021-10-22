@@ -71,8 +71,12 @@ class FIDTracker():
 
             def generator(ds, target_class):
                 ds.update_targets([target_class])
+                num_items = min(len(ds), 50000)
+                item_subset = [(i * num_gpus + rank) % num_items
+                               for i in range((num_items - 1) // num_gpus + 1)]
                 loader = torch.utils.data.DataLoader(
                     ds,
+                    sampler=item_subset,
                     batch_size=self.cfg.batch_gpu,
                     num_workers=3,
                 )
