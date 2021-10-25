@@ -13,11 +13,11 @@ import scipy.linalg
 import matplotlib.pyplot as plt
 from tqdm import trange
 
+import dnnlib
 from config import get_cfg_defaults
 from dataset import get_dataset
 from generate import image_generator
 from misc import setup_logger, master_only
-from .calc_inception import load_patched_inception_v3
 
 
 def pbar(rank, force=False):
@@ -28,6 +28,7 @@ def pbar(rank, force=False):
 
 class FIDTracker():
     def __init__(self, cfg, rank, num_gpus, out_dir):
+        detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
         print(f"[{os.getpid()}] rank: {rank}({num_gpus} gpus)")
 
         self.rank = rank
@@ -49,13 +50,16 @@ class FIDTracker():
         start = time.time()
         self.log.info("load inceptionV3 model...")
         if num_gpus == 1:
-            self.inceptionV3 = load_patched_inception_v3().eval().to(self.device)
+            with dnnlib.util.open_url(detector_url, verbose=True) as f:
+                self.inceptionV3 = pickle.load(f).to(self.device)
         else:
             if self.rank != 0:
-                torch.distributed.barrier()
-            self.inceptionV3 = load_patched_inception_v3().eval().to(self.device)
+                torch.distributed.barrier(device_ids=[rank])
+            with dnnlib.util.open_url(detector_url, verbose=(rank == 0)) as f:
+                self.inceptionV3 = pickle.load(f).to(self.device)
+            # self.inceptionV3 = load_patched_inception_v3().eval().to(self.device)
             if self.rank == 0:
-                torch.distributed.barrier()
+                torch.distributed.barrier(device_ids=[rank])
         self.log.info("load inceptionV3 model complete ({:.2f} sec)".format(time.time() - start))
 
         # get features for real images
@@ -170,10 +174,11 @@ class FIDTracker():
         while True:
             try:
                 imgs = next(img_generator)
+                imgs = (imgs * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             except StopIteration:
                 self.log.warn(f"Only get {cnt} images")
 
-            feature = self.inceptionV3(imgs)[0].view(imgs.shape[0], -1)
+            feature = self.inceptionV3(imgs, return_features=True)
             if self.num_gpus > 1:
                 _features = []
                 for src in range(self.num_gpus):
@@ -233,7 +238,7 @@ def subprocess_fn(rank, args, cfg, temp_dir):
             image_generator, g, cfg.EVAL.batch_gpu, ds=val_ds, device=device, num_gpus=args.num_gpus)
 
         if args.num_gpus > 1:
-            torch.distributed.barrier()
+            torch.distributed.barrier(device_ids=[rank])
 
         fid_tracker(g.classes, infer_fn, iteration, save=args.save)
 
