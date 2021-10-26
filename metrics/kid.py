@@ -26,7 +26,21 @@ def pbar(rank, force=False):
     return range_wrapper
 
 
-class FIDTracker():
+def calc_KID(real_features, gen_features, num_subsets=100, max_subset_size=1000):
+    n = real_features.shape[1]
+    m = min(min(real_features.shape[0], gen_features.shape[0]), max_subset_size)
+    t = 0
+    for _subset_idx in range(num_subsets):
+        x = gen_features[np.random.choice(gen_features.shape[0], m, replace=False)]
+        y = real_features[np.random.choice(real_features.shape[0], m, replace=False)]
+        a = (x @ x.T / n + 1) ** 3 + (y @ y.T / n + 1) ** 3
+        b = (x @ y.T / n + 1) ** 3
+        t += (a.sum() - np.diag(a).sum()) / (m - 1) - b.sum() * 2 / m
+    kid = t / num_subsets / m
+    return float(kid)
+
+
+class KIDTracker():
     def __init__(self, cfg, rank, num_gpus, out_dir):
         detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
         print(f"[{os.getpid()}] rank: {rank}({num_gpus} gpus)")
@@ -35,17 +49,16 @@ class FIDTracker():
         self.num_gpus = num_gpus
         self.device = torch.device('cuda', rank) if num_gpus > 1 else 'cuda'
         self.classes = cfg.classes
-        self.cfg = cfg.EVAL.FID
+        self.cfg = cfg.EVAL.KID
         self.log = logging.getLogger(f'GPU{rank}')
         self.pbar = pbar(rank)
         self.out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
 
         # metrics
-        self.n_sample = cfg.EVAL.FID.n_sample
-        self.real_means = None  # [ndarray(2048) float32] * num_class
-        self.real_covs = None  # [ndarray(2048, 2048) float64] * num_class
+        self.n_sample = cfg.EVAL.KID.n_sample
+        self.real_features = None
         self.iterations = []
-        self.fids = []
+        self.kids = []
 
         start = time.time()
         self.log.info("load inceptionV3 model...")
@@ -63,14 +76,13 @@ class FIDTracker():
         self.log.info("load inceptionV3 model complete ({:.2f} sec)".format(time.time() - start))
 
         # get features for real images
-        if cfg.EVAL.FID.inception_cache:
-            self.log.info(f"load inception cache from {cfg.EVAL.FID.inception_cache}")
-            embeds = pickle.load(open(cfg.EVAL.FID.inception_cache, 'rb'))
-            self.real_means = embeds['mean']
-            self.real_covs = embeds['cov']
-            self.classes = list(self.real_means.keys())
+        if cfg.EVAL.KID.inception_cache:
+            self.log.info(f"load inception cache from {cfg.EVAL.KID.inception_cache}")
+            embeds = pickle.load(open(cfg.EVAL.KID.inception_cache, 'rb'))
+            self.real_features = embeds['feature']
+            self.classes = list(self.real_features.keys())
         else:
-            real_means, real_covs = {}, {}
+            real_features = {}
             ds = get_dataset(cfg, split='all')
 
             def generator(ds, target_class):
@@ -91,86 +103,60 @@ class FIDTracker():
                 self.log.info(f"Extract real features from '{c}'")
                 t = time.time()
                 if c == 'face':
-                    real_means[c], real_covs[c] = self.extract_features(generator(ds, c))
+                    real_features[c] = self.extract_features(generator(ds, c))
                 elif c == 'human':
-                    mean_dict, cov_dict = self.extract_feature_dict(generator(ds, c))
-                    real_means.update(mean_dict)
-                    real_covs.update(cov_dict)
+                    feature_dict = self.extract_feature_dict(generator(ds, c))
+                    real_features.update(feature_dict)
                 else:
                     raise ValueError("Unknown class for dataset")
                 self.log.info(f"cost {time.time() - t :.2f} sec")
 
             if self.rank == 0:
                 self.log.info(f"save inception cache to {self.out_dir / 'inception_cache.pkl'}")
-                with open(self.out_dir / 'inception_cache.pkl', 'wb') as f:
-                    pickle.dump(dict(mean=real_means, cov=real_covs), f)
+                with open(self.out_dir / 'inception_cache_kid.pkl', 'wb') as f:
+                    pickle.dump(dict(feature=real_features), f)
 
-            self.real_means, self.real_covs = real_means, real_covs
-
-    @classmethod
-    def calc_fid(cls, real_mean, real_cov, sample_mean, sample_cov, eps=1e-6):
-        cov_sqrt, _ = scipy.linalg.sqrtm(sample_cov @ real_cov, disp=False)
-
-        if not np.isfinite(cov_sqrt).all():
-            print('product of cov matrices is singular')
-            offset = np.eye(sample_cov.shape[0]) * eps
-            cov_sqrt = scipy.linalg.sqrtm((sample_cov + offset) @ (real_cov + offset))
-
-        if np.iscomplexobj(cov_sqrt):
-            print("cov_sqrt is complex number")
-            if not np.allclose(np.diagonal(cov_sqrt).imag, 0, atol=1e-3):
-                m = np.max(np.abs(cov_sqrt.imag))
-
-                raise ValueError(f'Imaginary component {m}')
-
-            cov_sqrt = cov_sqrt.real
-
-        mean_diff = sample_mean - real_mean
-        mean_norm = mean_diff @ mean_diff
-
-        trace = np.trace(sample_cov) + np.trace(real_cov) - 2 * np.trace(cov_sqrt)
-        return mean_norm + trace
+            self.real_features = real_features
 
     def __call__(self, classes, generator_fn, iteration, save=False, eps=1e-6):
-        assert self.real_means is not None and self.real_covs is not None
         assert all(c in self.classes for c in classes)
         start = time.time()
         self.iterations.append(iteration)
-        fid = {}
+        kid = {}
 
         for c in classes:
             self.log.info(f"Extract feature from {c} on {iteration} iteration")
             if c == 'face':
-                sample_mean, sample_cov = self.extract_features(generator_fn(c))
-                fid[c] = FIDTracker.calc_fid(self.real_means[c], self.real_covs[c], sample_mean, sample_cov, eps=eps)
+                sample_feature = self.extract_features(generator_fn(c))
+                kid[c] = calc_KID(self.real_features[c], sample_feature)
             elif c == 'human':
-                sample_mean, sample_cov = self.extract_feature_dict(generator_fn(c))
-                for k in sample_mean.keys():
-                    fid[k] = FIDTracker.calc_fid(self.real_means[k], self.real_covs[k], sample_mean[k], sample_cov[k], eps=eps)
+                sample_feature_dict = self.extract_feature_dict(generator_fn(c))
+                for k in sample_feature_dict.keys():
+                    kid[k] = calc_KID(self.real_features[k], sample_feature_dict[k])
             else:
                 raise ValueError("Unknown class")
 
-        self.fids.append(fid)
+        self.kids.append(kid)
         total_time = time.time() - start
-        self.log.info(f'FID on {iteration} iterations: "{fid}". [costs {total_time: .2f} sec(s)]')
+        self.log.info(f'KID on {iteration} iterations: "{kid}". [costs {total_time: .2f} sec(s)]')
 
         if self.rank == 0 and save:
-            with open(self.out_dir / 'fid.txt', 'a+') as f:
-                f.write(f'{iteration}: {json.dumps(fid)}\n')
+            with open(self.out_dir / 'kid.txt', 'a+') as f:
+                f.write(f'{iteration}: {json.dumps(kid)}\n')
 
             # compatible with NVLab
-            result_dict = {"results": {"fid50k_full": fid},
-                           "metric": "fid50k_full",
+            result_dict = {"results": {"kid50k_full": kid},
+                           "metric": "kid50k_full",
                            "total_time": total_time,
                            "total_time_str": f"{int(total_time // 60)}m {int(total_time % 60)}s",
                            "num_gpus": self.num_gpus,
-                           "snapshot_pkl": "none",
+                           "snapshot_pkl": f"ckpt-{iteration: 06d}.pt",
                            "timestamp": time.time()}
 
-            with open(self.out_dir / 'metric-fid50k_full.jsonl', 'at') as f:
+            with open(self.out_dir / 'metric-kid50k_full.jsonl', 'at') as f:
                 f.write(f"{json.dumps(result_dict)}\n")
 
-        return fid
+        return kid
 
     @torch.no_grad()
     def extract_features(self, img_generator):
@@ -197,9 +183,7 @@ class FIDTracker():
                 break
 
         features = torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
-        mean = np.mean(features, 0)
-        cov = np.cov(features, rowvar=False)
-        return mean, cov
+        return features
 
     @torch.no_grad()
     def extract_feature_dict(self, img_generator):
@@ -233,23 +217,21 @@ class FIDTracker():
             if cnt >= self.n_sample:
                 break
 
-        mean_dict, cov_dict = dict(), dict()
-        for k, features in features_dict.items():
-            features = torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
-            mean_dict[k] = np.mean(features, 0)
-            cov_dict[k] = np.cov(features, rowvar=False)
-        return mean_dict, cov_dict
+        features_dict = {k: torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
+                         for k, features in features_dict.items()}
+
+        return features_dict
 
     def plot_figure(self):
-        self.log.info(f"save FID figure in {self.out_dir / 'fid.png'}")
+        self.log.info(f"save KID figure in {self.out_dir / 'kid.png'}")
         kiter = np.array(self.iterations) / 1000.
-        for c in self.fids[0].keys():
-            plt.plot(kiter, np.array([x[c] for x in self.fids]))
+        for c in self.kids[0].keys():
+            plt.plot(kiter, np.array([x[c] for x in self.kids]))
 
         plt.xlabel('k iterations')
-        plt.ylabel('FID')
+        plt.ylabel('KID')
         plt.legend(self.classes, loc='upper right')
-        plt.savefig(self.out_dir / 'fid.png')
+        plt.savefig(self.out_dir / 'kid.png')
 
 
 def subprocess_fn(rank, args, cfg, temp_dir):
@@ -261,7 +243,7 @@ def subprocess_fn(rank, args, cfg, temp_dir):
 
     setup_logger(args.out_dir, rank, debug=args.debug)
     device = torch.device('cuda', rank) if args.num_gpus > 1 else 'cuda'
-    fid_tracker = FIDTracker(cfg, rank, args.num_gpus, args.out_dir)
+    kid_tracker = KIDTracker(cfg, rank, args.num_gpus, args.out_dir)
 
     if args.ckpt is None:
         if rank == 0:
@@ -284,10 +266,10 @@ def subprocess_fn(rank, args, cfg, temp_dir):
         if args.num_gpus > 1:
             torch.distributed.barrier(device_ids=[rank])
 
-        fid_tracker(g.classes, infer_fn, iteration, save=args.save)
+        kid_tracker(g.classes, infer_fn, iteration, save=args.save)
 
     if rank == 0:
-        fid_tracker.plot_figure()
+        kid_tracker.plot_figure()
 
 
 if __name__ == '__main__':
@@ -299,9 +281,9 @@ if __name__ == '__main__':
     # parser.add_argument('--truncation_mean', type=int, default=4096)
     parser.add_argument("--cfg", type=str, help="path to the configuration file")
     parser.add_argument("--gpus", type=int, default=1, dest='num_gpus')
-    parser.add_argument('--out_dir', type=str, default='/tmp/fid_result')
+    parser.add_argument('--out_dir', type=str, default='/tmp/kid_result')
     parser.add_argument('--ckpt', type=str, default=None, metavar='CHECKPOINT', help='model ckpt or dir')
-    parser.add_argument('--save', action='store_true', default=False, help='save fid.txt')
+    parser.add_argument('--save', action='store_true', default=False, help='save kid.txt')
     parser.add_argument("--debug", action='store_true', default=False, help="whether to use debug mode")
 
     args = parser.parse_args()

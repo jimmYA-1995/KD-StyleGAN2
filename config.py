@@ -112,6 +112,11 @@ _C.EVAL.FID.every = 0
 _C.EVAL.FID.batch_gpu = 32
 _C.EVAL.FID.n_sample = 50000
 _C.EVAL.FID.inception_cache = ""
+_C.EVAL.KID = CN()
+_C.EVAL.KID.every = 0
+_C.EVAL.KID.batch_gpu = 32
+_C.EVAL.KID.n_sample = 50000
+_C.EVAL.KID.inception_cache = ""
 
 
 def get_cfg_defaults():
