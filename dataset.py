@@ -114,15 +114,12 @@ class DeepFashion(data.Dataset):
         resampling: bool = False,  # Whether to resample face position when create masked face
     ):
         assert roots is not None and sources is not None
-        self.classes = ["DF_face", "DF_human"]
         self.res = resolution
         self.xflip = xflip
         # all targets: ['face', 'human', 'heatmap', 'masked_face', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
-        self.available_targets = ['face', 'human', 'face_lm']
-        face_ratio = float(sources[1].split('_')[-1])
-        face_size = int(resolution * face_ratio)
-        self.mask_slice = (slice(16, 16 + face_size), slice((resolution - face_size) // 2, (resolution + face_size) // 2))
-        self.mask_size = (face_size, face_size)
+        self.available_targets = ['1', '0.25', '0.125']
+        self.mask_slice = {}
+        self.mask_size = {}
         self.targets = []
 
         root = Path(roots[0]).expanduser()
@@ -135,14 +132,23 @@ class DeepFashion(data.Dataset):
         self.small = DeepFashion.FacePosition(44.56, 3.32, 517.075, 26.655, 100.36, 17.22)
         self.rng = np.random.default_rng()
 
+        # subdirectory
+        self.tgt_dir = {
+            '1': root / self.src / 'face',
+            '0.25': root / f'r{self.res}/fixedface_unalign1.0_0.25',
+            '0.125': root / f'r{self.res}/fixedface_unalign1.0_0.125',
+        }
+        for k in self.tgt_dir.keys():
+            face_size = int(resolution * float(k))
+            self.mask_size[k] = (slice(16, 16 + face_size), slice((resolution - face_size) // 2, (resolution + face_size) // 2))
+            self.mask_size = (face_size, face_size)
+
         self.src = sources[0]
         self.face_dir = root / self.src / 'face'
-        self.human_dir = root / f'r{self.res}' / sources[1]
         self.kp_dir = root / 'kp_heatmaps/keypoints'
         self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
-        assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
+        assert self.face_dir.exists() and self.kp_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
-        assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.kp_dir.glob('*.pkl'))
 
         total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
@@ -196,9 +202,12 @@ class DeepFashion(data.Dataset):
             img = io.imread(self.face_dir / f'{fileID}.png')
             data['face'] = self.transform(img)
 
-        if 'human' in self.targets:
-            img = io.imread(self.human_dir / f'{fileID}.png')
-            data['human'] = self.transform(img)
+        for tgt, dir in self.tgt_dir.items():
+            if tgt not in self.targets:
+                continue
+
+            img = io.imread(dir / f'{fileID}.png')
+            data[tgt] = self.transform(img)
 
         if 'masked_face' in self.targets:
             assert 'face' in data, "require face targets to make masked_face"

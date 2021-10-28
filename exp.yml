@@ -1,13 +1,14 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-atten'
+name: 'Dbr-1-0.25-0.125'
 description: >
-    Default configuration for synthesis of face & human.
+    Default configuration for synthesis of DeepFashion in 3 scales: 1(face), 0.25(human), 0.125(human)
     fixed face position. with reconstruction loss
 n_sample: 64
 resolution: 256
 classes:
-- 'face'
-- 'human'
+- '1'
+- '0.25'
+- '0.125'
 
 ADA:
   enabled: true
@@ -23,7 +24,6 @@ DATASET:
     - '~/data/deepfashion'
   sources:
     - 'unalign_1.0'                 # directory of face image
-    - 'fixedface_unalign1.0_0.125'  # subdirectory of human image
   xflip: true
   num_workers: 0
   pin_memory: true
@@ -32,8 +32,6 @@ MODEL:
   z_dim: 512
   w_dim: 512
   mode: 'joint'
-  freeze_teacher: false
-  teacher_weight: ''
 
   MAPPING:
     num_layers: 8
@@ -44,18 +42,18 @@ MODEL:
   SYNTHESIS:
     img_channels: 3
     bottom_res: 4
-    channel_base: 16384
+    channel_base: 32768
 
   ATTENTION:
     resolutions: []
     feature_types: 'relu'
 
   DISCRIMINATOR:
-    img_channels: [3]
-    c_dim: 2
+    img_channels: [3, 3, 3]
+    c_dim: 0
     branch_res: 32
     top_res: 4
-    channel_base: 16384
+    channel_base: 32768
 
 
 TRAIN:

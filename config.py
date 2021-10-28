@@ -28,8 +28,6 @@ _C.MODEL = CN()
 _C.MODEL.z_dim = 512
 _C.MODEL.w_dim = 512
 _C.MODEL.mode = ''  # ['split', 'join']
-_C.MODEL.freeze_teacher = False
-_C.MODEL.teacher_weight = ''
 
 _C.MODEL.MAPPING = CN()
 _C.MODEL.MAPPING.num_layers = 8

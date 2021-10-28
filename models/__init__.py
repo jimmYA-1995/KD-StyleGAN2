@@ -11,7 +11,6 @@ def create_model(cfg, device=None, eval_only=False):
         cfg.classes,
         cfg.resolution,
         mode=cfg.MODEL.mode,
-        freeze_teacher=cfg.MODEL.freeze_teacher,
         mapping_kwargs=cfg.MODEL.MAPPING,
         synthesis_kwargs=dict(cfg.MODEL.SYNTHESIS),
     ).to(device)
@@ -19,13 +18,8 @@ def create_model(cfg, device=None, eval_only=False):
     if eval_only:
         return g.eval()
 
-    if cfg.MODEL.ATTENTION.resolutions:
-        atten = AttentionNetwork(g.classes, g.channel_dict, **cfg.MODEL.ATTENTION).to(device)
-    else:
-        atten = None
-
     d = Discriminator(cfg.resolution, **cfg.MODEL.DISCRIMINATOR).to(device)
-    return g, d, atten
+    return g, d
 
 
 def map_keys(k):
@@ -56,29 +50,3 @@ def map_keys(k):
     # 我的多 resample_filter & noise_const
     new_key += '.'.join(ks[3:])
     return new_key
-
-
-def resume_teacherNet_from_NV_weights(g, c, verbose=False):
-    cnt = 0
-    g_keys = set([x[0] for x in g.named_parameters()] + [x[0] for x in g.named_buffers()])
-    for old_k, value in c.items():
-        if old_k in ['mapping.w_avg']:
-            continue
-
-        new_k = map_keys(old_k)
-        obj = g
-        for attr in new_k.split('.'):
-            obj = getattr(obj, attr)
-            assert obj is not None, f"attr not found: {obj} has no {attr}"
-
-        assert obj.shape == value.shape, f"shape not match: {new_k}({obj.shape}) v.s {old_k}({value.shape})"
-        obj.copy_(value)
-        cnt += 1
-        g_keys.remove(new_k)
-        if verbose:
-            print(f"{old_k} -> {new_k}")
-
-    if verbose:
-        print(f"load: {cnt}/{len(c.items())};")
-        print("missed:")
-        print([x for x in g_keys if 'human' not in x])

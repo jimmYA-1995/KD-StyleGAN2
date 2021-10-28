@@ -69,12 +69,9 @@ class Trainer():
 
         self.train_ds = get_dataset(cfg, split='all')
         self.val_ds = None  # get_dataset(cfg, split='val', xflip=True)
-        self.fixed_mask = torch.zeros([1, 1, cfg.resolution, cfg.resolution], device=self.device)
-        self.fixed_mask[(slice(None), slice(None)) + self.train_ds.mask_slice] = 1.
-        self.fixed_mask = self.fixed_mask.repeat(self.batch_gpu, 1, 1, 1)
         self._samples = None
 
-        self.g, self.d, self.atten = create_model(cfg, device=self.device)
+        self.g, self.d = create_model(cfg, device=self.device)
         self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
 
         self.rec_loss = MaskedRecLoss(mask=None, num_channels=1, device=self.device)
@@ -84,18 +81,13 @@ class Trainer():
         d_reg_ratio = cfg.TRAIN.R1.every / (cfg.TRAIN.R1.every + 1) if cfg.TRAIN.R1.every != -1 else 1
         self.g_optim = torch.optim.Adam(self.g.parameters(), lr=cfg.TRAIN.lrate * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio))
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
-        self.a_optim = torch.optim.Adam(self.atten.parameters(), lr=cfg.TRAIN.lrate_atten, betas=(0, 0.99)) if self.atten is not None else None
 
         # Print network summary tables.
         if self.local_rank == 0:
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
             c = torch.empty([self.batch_gpu * len(cfg.classes), self.d.c_dim], device=self.device) if self.d.c_dim > 0 else None
             heatmaps = None
-            return_feat_res = None if self.atten is None else self.atten.resolutions
-            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=return_feat_res)
-            if self.atten is not None:
-                mask = torch.bernoulli(torch.empty([self.batch_gpu, 1, cfg.resolution, cfg.resolution], device=self.device).uniform_())
-                _ = print_module_summary(self.atten, [feats, mask])
+            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=None)
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=0 if self.d.c_dim > 0 else 1), c])
 
         if 'fid' in self.metrics:
@@ -112,18 +104,9 @@ class Trainer():
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
         find_unused = False
-        self.ckpt_required_keys = ["g", "atten", "d", "g_ema", "g_optim", "d_optim", "stats"]
+        self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
-        elif cfg.MODEL.teacher_weight:
-            find_unused = True
-            assert cfg.TRAIN.PPL.every == -1, ""
-            self.log.info(f"resume teacher Net from {cfg.MODEL.teacher_weight}")
-            ckpt = torch.load(cfg.MODEL.teacher_weight)['g_ema']
-            self.g.requires_grad_(False)
-            resume_teacherNet_from_NV_weights(self.g, ckpt, verbose=debug)
-            self.g.requires_grad_(True)
-            resume_teacherNet_from_NV_weights(self.g_ema, ckpt, verbose=debug)
 
         if cfg.ADA.enabled:
             self.log.info("build Augment Pipe")
@@ -135,12 +118,10 @@ class Trainer():
                 self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
                 self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
 
-        self.g_, self.atten_, self.d_ = self.g, self.atten, self.d
+        self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
             self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=find_unused)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
-            if self.atten is not None:
-                self.atten = DDP(self.atten, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
             self.run = self.launch_wandb()
@@ -156,7 +137,6 @@ class Trainer():
         self.autocast = True if amp else False
         self.g_scaler = GradScaler(enabled=amp)
         self.d_scaler = GradScaler(enabled=amp)
-        # TODO decide whether to enable gradscaler for attention network
         # TODO allow using tf32 for matmul and convolution
 
     def get_output_dir(self, cfg) -> Path:
@@ -300,7 +280,6 @@ class Trainer():
 
         snapshot = {
             'g': self.g_.state_dict(),
-            'atten': self.atten_.state_dict() if self.atten_ is not None else None,
             'd': self.d_.state_dict(),
             'g_ema': self.g_ema.state_dict(),
             'g_optim': self.g_optim.state_dict(),
@@ -322,7 +301,7 @@ class Trainer():
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
         cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
         cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = ['face', 'human']
+        targets = ['1', '0.25', '0.125']
         self.train_ds.update_targets(targets)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
@@ -370,11 +349,12 @@ class Trainer():
 
         loss_Dmain = loss_Dr1 = 0
         if self.cfg.ADA.enabled:
-            data['face'] = self.augment_pipe(data['face'])
-            data['human'] = self.augment_pipe(data['human'])
-        real = torch.cat([data['face'], data['human']], dim=0 if self.d_.c_dim > 0 else 1).detach().requires_grad_(r1_reg)
+            data.update({k: self.augment_pipe(v) for k, v in self.cfg.classes})
 
-        z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
+        cat_dim = 0 if self.d_.c_dim > 0 else 1
+        real = torch.cat([data[c] for c in self.cfg.classes], dim=cat_dim).detach().requires_grad_(r1_reg)
+
+        z = torch.randn(data[self.cfg.classes[0]].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
             fake_imgs, _ = self.g(z, None)
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
@@ -420,17 +400,15 @@ class Trainer():
         self.d_scaler.update()
 
     def Gmain(self, data, pl_reg=False):
-        self.g_.requires_grad_with_freeze_(True)
+        self.g.requires_grad_(True)
         self.d.requires_grad_(False)
-        if self.atten is not None:
-            self.atten.requires_grad_(True)
+        ref_c = self.cfg.classes[0]
 
-        z = torch.randn(data['face'].shape[0], self.g_.z_dim, device=self.device)
+        z = torch.randn(data[ref_c].shape[0], self.g_.z_dim, device=self.device)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
-            fake_imgs, feats = self.g(z, None, return_feat_res=return_feat_res)
+            fake_imgs, feats = self.g(z, None, return_feat_res=None)
 
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
@@ -445,34 +423,24 @@ class Trainer():
             self.stats['loss/G-GAN'] = gan_loss.detach()
             loss_Gmain = loss_Gmain + gan_loss
 
-            # attention feature reconstruction loss
-            if self.atten is not None:
-                self.atten.zero_grad(set_to_none=True)
-                query_feats, out_feats = self.atten(feats, mask=self.fixed_mask[:z.shape[0]].detach())
-                for res in return_feat_res:
-                    rec_loss = torch.nn.functional.l1_loss(out_feats[res], query_feats[res].detach())
-                    self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
-                    loss_Gmain = loss_Gmain + rec_loss
+            # recontruction loss
+            for c in self.g_.classes[1:]:
+                rec_targets = torch.nn.functional.interpolate(fake_imgs[ref_c], self.train_ds.mask_size[c], mode='bicubic').detach()
+                loss_rec = self.rec_loss(rec_targets, fake_imgs[c][(slice(None), slice(None)) + self.train_ds.mask_slice[c]])
+                self.stats[f'loss/G-reconstruction-{c}'] = loss_rec.detach()
+                loss_Gmain = loss_Gmain + loss_rec
 
-            rec_targets = torch.nn.functional.interpolate(fake_imgs['face'], self.train_ds.mask_size, mode='bicubic').detach()
-            loss_rec = self.rec_loss(rec_targets, fake_imgs['human'][(slice(None), slice(None)) + self.train_ds.mask_slice])
-            self.stats['loss/G-reconstruction'] = loss_rec.detach()
-            loss_Gmain = loss_Gmain + loss_rec
-        # self.g.zero_grad(set_to_none=True)
-        # self.g_scaler.scale(loss_Gmain).backward()
-        # self.g_scaler.step(self.g_optim)
-        # self.g_scaler.update()
         if pl_reg:
             cfg = self.cfg.TRAIN.PPL
             pl_bs = max(1, self.batch_gpu // cfg.bs_shrink)
             with autocast(enabled=self.autocast):
                 fake_imgs, _, ws = self.g(z[:pl_bs], None, return_dlatent=pl_reg)
                 path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
-                    fake_imgs['face'],
-                    ws['face'],
+                    fake_imgs[ref_c],
+                    ws[ref_c],
                     self.stats['mean_path_length'].detach()
                 )
-            loss_Gpl = path_loss * cfg.gain * cfg.every + 0 * fake_imgs['face'][0, 0, 0, 0]
+            loss_Gpl = path_loss * cfg.gain * cfg.every + 0 * fake_imgs[ref_c][0, 0, 0, 0]
             self.stats['loss/PPL'] = path_loss.detach()
 
         g_loss = loss_Gmain + loss_Gpl
@@ -515,7 +483,7 @@ class Trainer():
         """ inference & save sample images """
         if self._samples is None:
             ds = get_dataset(self.cfg, split='test', xflip=False, num_items=self.cfg.n_sample)
-            ds.update_targets(["face", "human", "face_lm"])
+            ds.update_targets(self.cfg.classes)
             loader = torch.utils.data.DataLoader(
                 ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
@@ -523,7 +491,7 @@ class Trainer():
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(loader)).items()}
             self.real_samples = {k: self.all_gather(v) for k, v in self._samples.items()}
-            _samples = [self.real_samples['face'], self.real_samples['human']]
+            _samples = [self.real_samples[c] for c in self.cfg.classes]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
             save_image(
                 samples,
@@ -533,12 +501,9 @@ class Trainer():
                 value_range=(-1, 1),
             )
 
-        z = torch.randn([self._samples['face'].shape[0], self.g_ema.z_dim], device=self.device)
-        return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
+        z = torch.randn([self._samples[self.cfg.classes[0]].shape[0], self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
-            _fake_imgs, feats = self.g_ema(z, None, return_feat_res=return_feat_res)
-            if self.atten is not None:
-                atten_out = self.atten(feats, self.fixed_mask[0:1].repeat(z.shape[0], 1, 1, 1), self._samples['face_lm'], eval=True)
+            _fake_imgs, _ = self.g_ema(z, None, return_feat_res=None)
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
@@ -547,15 +512,7 @@ class Trainer():
                 assert fake_imgs[cn].shape[0] == self.cfg.n_sample
 
         if self.local_rank == 0:
-            if return_feat_res:
-                self.plot_attention(
-                    self.outdir / 'samples' / f'fake-{i :06d}-atten.png',
-                    _fake_imgs,
-                    atten_out,
-                    self._samples['face_lm']
-                )
-
-            _samples = [fake_imgs['face'], fake_imgs['human']]
+            _samples = [fake_imgs[c] for c in self.cfg.classes]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
             save_image(
                 samples,
@@ -564,69 +521,6 @@ class Trainer():
                 normalize=True,
                 value_range=(-1, 1),
             )
-
-    def plot_attention(self, out_path, imgs, attens, raw_sample_pts):
-        top_res = self.cfg.resolution
-        faces = np.clip(imgs['face'].cpu().numpy().transpose(0, 2, 3, 1) * 127.5 + 127.5, 0, 255).astype(np.uint8)
-        humans = np.clip(imgs['human'].cpu().numpy().transpose(0, 2, 3, 1) * 127.5 + 127.5, 0, 255).astype(np.uint8)
-        raw_sample_pts = raw_sample_pts.cpu().numpy()
-        img_grids = [None for _ in range(faces.shape[0])]
-        for res, a in attens.items():
-            if res in [4, 8]:
-                continue
-
-            query_pts = a['pts'].cpu().numpy()    # [B, Q, 2]
-            matrices = a['matrix'].cpu().numpy()  # [B, Q, S, h]
-            mask = a['mask']                      # [B, 1, res, res] or None
-            if mask is not None:
-                mask = mask.cpu().numpy()
-
-            for i, matrix in enumerate(matrices):
-                face = cv2.resize(faces[i], (res, res), interpolation=cv2.INTER_CUBIC)
-                human = cv2.resize(humans[i], (res, res), interpolation=cv2.INTER_CUBIC)
-                img = np.concatenate([faces[i], humans[i]], axis=1)
-                raw_sample_pt = raw_sample_pts[i]
-                src_pts = query_pts[i]
-                if mask is not None:
-                    m = mask[i, 0]
-                    alpha = (m[..., None] * 255).astype(np.uint8)
-                    human = np.concatenate([human, np.where(alpha == 0, 128, alpha)], axis=-1)
-                    y_indices, x_indices = np.nonzero(m)
-                    matrix = matrix[:, :len(y_indices)]  # truncate padding area
-                else:
-                    human = np.concatenate([human, np.full((res, res, 1), 255, dtype=np.uint8)], axis=-1)
-                    y_indices, x_indices = np.meshgrid(np.arange(res), np.arange(res))
-                face = np.concatenate([face, np.full((res, res, 1), 255, dtype=np.uint8)], axis=-1)
-                indices = np.vstack([x_indices, y_indices]).T  # [s, 2]
-                img = np.concatenate([face, human], axis=1)
-
-                # method 1: find the indices on human image which face pts have highest scores
-                highest_indices = matrix.argmax(axis=1)
-                n_head = highest_indices.shape[1]
-                required = n_head // (top_res // res) + int(n_head % (top_res // res) != 0)
-                gallery = np.zeros((top_res, required * res * 2, 4), np.uint8)
-                for h_idx in range(n_head):
-                    vis_img = img.copy()
-                    label = f"{res}x{res}-head{h_idx+1}"
-                    highest = highest_indices[:, h_idx]  # [Q,]
-                    dst_pts = np.take(indices, highest, axis=0)  # [Q, 2]
-                    dst_pts[:, 0] += res
-                    for raw_src, src, dst in zip(raw_sample_pt, src_pts, dst_pts):
-                        if (raw_src < 0).any() or (raw_src > 256).any():
-                            continue
-                        cv2.line(vis_img, tuple(src), tuple(dst), (255, 0, 0), thickness=1, lineType=cv2.LINE_AA)
-
-                    x1 = h_idx // (top_res // res) * res * 2
-                    y1 = h_idx % (top_res // res) * res
-                    gallery[y1: y1 + res, x1: x1 + (res * 2), :] = vis_img.astype(np.uint8)
-
-                if img_grids[i] is not None:
-                    img_grids[i] = np.concatenate([img_grids[i], gallery], axis=1)
-                else:
-                    img_grids[i] = gallery
-
-        out = np.concatenate(img_grids, axis=0)
-        Image.fromarray(out, mode='RGBA').save(out_path)
 
     def all_gather(self, tensor, cat_dim=0):
         """ All gather `tensor` and concatenate along `cat_dim`. When write this code,
