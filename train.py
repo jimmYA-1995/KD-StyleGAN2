@@ -17,7 +17,6 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 import wandb
 
-import metrics
 from augment import AugmentPipe
 from config import *
 from dataset import get_dataset, get_sampler
@@ -25,6 +24,7 @@ from generate import image_generator
 from losses import *
 from misc import *
 from models import *
+from metrics.fid import FIDTracker
 from torch_utils.misc import print_module_summary, constant
 
 
@@ -99,7 +99,7 @@ class Trainer():
             print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=0 if self.d.c_dim > 0 else 1), c])
 
         if 'fid' in self.metrics:
-            self.fid_tracker = metrics.fid.FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
+            self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
             self.infer_fn = functools.partial(
                 image_generator,
                 self.g_ema,
