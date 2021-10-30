@@ -153,7 +153,6 @@ class Generator(nn.Module):
         mapping_kwargs: dict = {},         # Arguments for MappingNetwork.
         synthesis_kwargs: dict = {},       # Arguments for SynthesisNetwork.
     ):
-        assert len(classes) == 2
         assert mode in ['split', 'joint']
         super(Generator, self).__init__()
 
@@ -169,7 +168,7 @@ class Generator(nn.Module):
 
         if mode == 'joint':
             synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
-            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=2, w_dim=w_dim, **mapping_kwargs)
+            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=len(classes), w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[c, mapping1] for c in classes])
             self.synthesis = nn.ModuleDict([[c, synthesis1] for c in classes])
         else:
@@ -194,8 +193,8 @@ class Generator(nn.Module):
 
         if self.mode == 'joint':
             c = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
-            z = z.repeat(2, 1)
-            ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(2)
+            z = z.repeat(len(self.classes), 1)
+            ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(len(self.classes))
             ws = {class_name: w for class_name, w in zip(self.classes, ws)}
         else:  # split
             ws = {}

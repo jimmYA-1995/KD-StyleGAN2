@@ -301,7 +301,7 @@ class Trainer():
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
         cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
         cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = ['1', '0.25', '0.125']
+        targets = self.cfg.classes
         self.train_ds.update_targets(targets)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
@@ -349,7 +349,8 @@ class Trainer():
 
         loss_Dmain = loss_Dr1 = 0
         if self.cfg.ADA.enabled:
-            data.update({k: self.augment_pipe(v) for k, v in self.cfg.classes})
+            aug_data = {k: self.augment_pipe(data[k]) for k in self.cfg.classes}
+            data.update(aug_data)
 
         cat_dim = 0 if self.d_.c_dim > 0 else 1
         real = torch.cat([data[c] for c in self.cfg.classes], dim=cat_dim).detach().requires_grad_(r1_reg)
@@ -448,8 +449,6 @@ class Trainer():
         self.g_scaler.scale(g_loss).backward()
         self.g_scaler.step(self.g_optim)
         self.g_scaler.update()
-        if self.a_optim is not None:
-            self.a_optim.step()
 
     def reduce_stats(self):
         """ Reduce all training stats to master for reporting. """

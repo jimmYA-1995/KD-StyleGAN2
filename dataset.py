@@ -117,7 +117,7 @@ class DeepFashion(data.Dataset):
         self.res = resolution
         self.xflip = xflip
         # all targets: ['face', 'human', 'heatmap', 'masked_face', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
-        self.available_targets = ['1', '0.25', '0.125']
+        self.available_targets = ['1', '1/4', '1/8']
         self.mask_slice = {}
         self.mask_size = {}
         self.targets = []
@@ -133,17 +133,17 @@ class DeepFashion(data.Dataset):
         self.rng = np.random.default_rng()
 
         # subdirectory
+        self.src = sources[0]
         self.tgt_dir = {
             '1': root / self.src / 'face',
-            '0.25': root / f'r{self.res}/fixedface_unalign1.0_0.25',
-            '0.125': root / f'r{self.res}/fixedface_unalign1.0_0.125',
+            '1/4': root / f'r{self.res}/fixedface_unalign1.0_0.25',
+            '1/8': root / f'r{self.res}/fixedface_unalign1.0_0.125',
         }
         for k in self.tgt_dir.keys():
-            face_size = int(resolution * float(k))
-            self.mask_size[k] = (slice(16, 16 + face_size), slice((resolution - face_size) // 2, (resolution + face_size) // 2))
-            self.mask_size = (face_size, face_size)
+            face_size = int(resolution * float(eval(k)))
+            self.mask_slice[k] = (slice(16, 16 + face_size), slice((resolution - face_size) // 2, (resolution + face_size) // 2))
+            self.mask_size[k] = (face_size, face_size)
 
-        self.src = sources[0]
         self.face_dir = root / self.src / 'face'
         self.kp_dir = root / 'kp_heatmaps/keypoints'
         self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))

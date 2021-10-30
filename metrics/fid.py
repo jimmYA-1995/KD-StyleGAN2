@@ -90,14 +90,8 @@ class FIDTracker():
             for c in self.classes:
                 self.log.info(f"Extract real features from '{c}'")
                 t = time.time()
-                if c == 'face':
-                    real_means[c], real_covs[c] = self.extract_features(generator(ds, c))
-                elif c == 'human':
-                    mean_dict, cov_dict = self.extract_feature_dict(generator(ds, c))
-                    real_means.update(mean_dict)
-                    real_covs.update(cov_dict)
-                else:
-                    raise ValueError("Unknown class for dataset")
+                real_means[c], real_covs[c] = self.extract_features(generator(ds, c))
+
                 self.log.info(f"cost {time.time() - t :.2f} sec")
 
             if self.rank == 0:
@@ -140,15 +134,8 @@ class FIDTracker():
 
         for c in classes:
             self.log.info(f"Extract feature from {c} on {iteration} iteration")
-            if c == 'face':
-                sample_mean, sample_cov = self.extract_features(generator_fn(c))
-                fid[c] = FIDTracker.calc_fid(self.real_means[c], self.real_covs[c], sample_mean, sample_cov, eps=eps)
-            elif c == 'human':
-                sample_mean, sample_cov = self.extract_feature_dict(generator_fn(c))
-                for k in sample_mean.keys():
-                    fid[k] = FIDTracker.calc_fid(self.real_means[k], self.real_covs[k], sample_mean[k], sample_cov[k], eps=eps)
-            else:
-                raise ValueError("Unknown class")
+            sample_mean, sample_cov = self.extract_features(generator_fn(c))
+            fid[c] = FIDTracker.calc_fid(self.real_means[c], self.real_covs[c], sample_mean, sample_cov, eps=eps)
 
         self.fids.append(fid)
         total_time = time.time() - start
@@ -200,45 +187,6 @@ class FIDTracker():
         mean = np.mean(features, 0)
         cov = np.cov(features, rowvar=False)
         return mean, cov
-
-    @torch.no_grad()
-    def extract_feature_dict(self, img_generator):
-        cnt = 0
-        slicing_map = {
-            'human': (slice(None),) * 4,
-            'human-TopHalf': (slice(None), slice(None), slice(None, 128), slice(None)),
-            'human-BtmHalf': (slice(None), slice(None), slice(128, None), slice(None)),
-            'human-TopCentral': (slice(None), slice(None), slice(None, 128), slice(64, 192))
-        }
-        features_dict = {k: [] for k in slicing_map.keys()}
-        features = []
-        while True:
-            try:
-                imgs = next(img_generator)
-                imgs = (imgs * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            except StopIteration:
-                self.log.warn(f"Only get {cnt} images")
-
-            for k, features in features_dict.items():
-                feature = self.inceptionV3(imgs[slicing_map[k]], return_features=True)
-                if self.num_gpus > 1:
-                    _features = []
-                    for src in range(self.num_gpus):
-                        y = feature.clone()
-                        torch.distributed.broadcast(y, src=src)
-                        _features.append(y)
-                    feature = torch.stack(_features, dim=1).flatten(0, 1)
-                features.append(feature)
-            cnt += feature.shape[0]
-            if cnt >= self.n_sample:
-                break
-
-        mean_dict, cov_dict = dict(), dict()
-        for k, features in features_dict.items():
-            features = torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
-            mean_dict[k] = np.mean(features, 0)
-            cov_dict[k] = np.cov(features, rowvar=False)
-        return mean_dict, cov_dict
 
     def plot_figure(self):
         self.log.info(f"save FID figure in {self.out_dir / 'fid.png'}")

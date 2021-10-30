@@ -1,14 +1,14 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-1-0.25-0.125'
+name: 'Dbr-1-1/4-1/8'
 description: >
-    Default configuration for synthesis of DeepFashion in 3 scales: 1(face), 0.25(human), 0.125(human)
+    Default configuration for synthesis of DeepFashion in 3 scales: 1(face), 1/4(human), 1/8(human)
     fixed face position. with reconstruction loss
 n_sample: 64
 resolution: 256
 classes:
 - '1'
-- '0.25'
-- '0.125'
+- '1/4'
+- '1/8'
 
 ADA:
   enabled: true
