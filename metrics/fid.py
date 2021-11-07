@@ -34,7 +34,7 @@ class FIDTracker():
         self.rank = rank
         self.num_gpus = num_gpus
         self.device = torch.device('cuda', rank) if num_gpus > 1 else 'cuda'
-        self.classes = cfg.classes
+        self.classes = cfg.classes[:2]
         self.cfg = cfg.EVAL.FID
         self.log = logging.getLogger(f'GPU{rank}')
         self.pbar = pbar(rank)
@@ -84,7 +84,7 @@ class FIDTracker():
                     batch_size=self.cfg.batch_gpu,
                     num_workers=3,
                 )
-                for batch in loader:
+                for batch, _ in loader:
                     yield batch[target_class].to(self.device)
 
             for c in self.classes:

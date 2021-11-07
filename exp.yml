@@ -1,17 +1,16 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-1-1/4-1/8'
+name: 'Dbr-TS'
 description: >
-    Default configuration for synthesis of DeepFashion in 3 scales: 1(face), 1/4(human), 1/8(human)
-    fixed face position. with reconstruction loss
+    ref(face), target(1/8), and discrete class for manually defined Translation & Scaling. with reconstruction loss
 n_sample: 64
 resolution: 256
 classes:
-- '1'
-- '1/4'
-- '1/8'
+- 'ref'
+- 'target'
+- 'trans'
 
 ADA:
-  enabled: true
+  enabled: false  # ADA transformation is ambiguous with our translation labels
   target: 0.6  # set 0 to fix prob.
   p: 0.0
   interval: 4
@@ -19,19 +18,19 @@ ADA:
   # KWARGS:
 
 DATASET:
-  name: DeepFashion
+  name: DeepFashion_TS
   roots:
     - '~/data/deepfashion'
   sources:
     - 'unalign_1.0'                 # directory of face image
+    - 'fixedface_unalign1.0_0.125'
   xflip: true
-  num_workers: 0
+  num_workers: 4
   pin_memory: true
 
 MODEL:
   z_dim: 512
   w_dim: 512
-  mode: 'joint'
 
   MAPPING:
     num_layers: 8
@@ -49,16 +48,16 @@ MODEL:
     feature_types: 'relu'
 
   DISCRIMINATOR:
-    img_channels: [3, 3, 3]
-    c_dim: 0
+    img_channels: [3]
+    c_dim: 11
     branch_res: 32
     top_res: 4
     channel_base: 32768
 
 
 TRAIN:
-  iteration: 5
-  batch_gpu: 8
+  iteration: 300000
+  batch_gpu: 4
   lrate: 0.002
   lrate_atten: 0.002
   R1:
@@ -71,17 +70,17 @@ TRAIN:
   style_mixing_prob: 0.0
   CKPT:
     path: ''
-    every: 5
+    every: 6250
     max_keep: -1
   SAMPLE:
-    every: 5
+    every: 6250
 
 EVAL:
   metrics: 'fid'
   batch_gpu: 8
   FID:
-    every: 5
+    every: 6250
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: ''
+    inception_cache: 'inception_cache.pkl'
 

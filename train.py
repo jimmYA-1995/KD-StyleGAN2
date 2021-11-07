@@ -67,14 +67,19 @@ class Trainer():
             (self.outdir / 'config.yml').write_text(cfg.dump())
             print(cfg)
 
-        self.train_ds = get_dataset(cfg, split='all')
+        self.train_ds = get_dataset(cfg, split='all', target_ratio=0.125)
+        self.facebox = torch.from_numpy(self.train_ds.facebox).to(self.device)
+        self.transbox = torch.from_numpy(self.train_ds.transbox).to(self.device)
+        self.targetbox = torch.from_numpy(self.train_ds.targetbox).to(self.device)
+        self.num_classes = self.train_ds.num_classes
+        assert self.num_classes == cfg.MODEL.DISCRIMINATOR.c_dim, f"{self.num_classes} v.s {cfg.MODEL.DISCRIMINATOR.c_dim}"
         self.val_ds = None  # get_dataset(cfg, split='val', xflip=True)
         self._samples = None
 
-        self.g, self.d = create_model(cfg, device=self.device)
+        self.g, self.d = create_model(cfg, self.num_classes, device=self.device)
         self.g_ema = copy.deepcopy(self.g).eval().requires_grad_(False)
 
-        self.rec_loss = MaskedRecLoss(mask=None, num_channels=1, device=self.device)
+        # self.rec_loss = MaskedRecLoss(mask=None, num_channels=1, device=self.device)
 
         # Define optimizers with Lazy regularizer
         g_reg_ratio = cfg.TRAIN.PPL.every / (cfg.TRAIN.PPL.every + 1) if cfg.TRAIN.PPL.every != -1 else 1
@@ -85,10 +90,11 @@ class Trainer():
         # Print network summary tables.
         if self.local_rank == 0:
             z = torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)
-            c = torch.empty([self.batch_gpu * len(cfg.classes), self.d.c_dim], device=self.device) if self.d.c_dim > 0 else None
-            heatmaps = None
-            imgs, feats = print_module_summary(self.g, [z, heatmaps], return_feat_res=None)
-            print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=0 if self.d.c_dim > 0 else 1), c])
+            gc = torch.empty([self.batch_gpu, self.num_classes], device=self.device)
+            imgs = print_module_summary(self.g, [z, gc])
+
+            dc = torch.empty([self.batch_gpu * len(self.g.branches), self.num_classes], device=self.device)
+            print_module_summary(self.d, [torch.cat(list(imgs.values()), dim=0), dc])
 
         if 'fid' in self.metrics:
             self.fid_tracker = FIDTracker(cfg, self.local_rank, self.num_gpus, self.outdir)
@@ -103,8 +109,7 @@ class Trainer():
 
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
-        find_unused = False
-        self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "stats"]
+        self.ckpt_required_keys = ["g", "d", "g_ema", "g_optim", "d_optim", "g_scaler", "d_scaler", "stats"]
         if cfg.TRAIN.CKPT.path:
             self.resume_from_checkpoint(cfg.TRAIN.CKPT.path)
 
@@ -120,7 +125,7 @@ class Trainer():
 
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
-            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=find_unused)
+            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
             self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
@@ -225,11 +230,9 @@ class Trainer():
             if self.num_gpus > 1:
                 loader.sampler.set_epoch(self.epoch)
 
-            for batch in loader:
-                if isinstance(batch, dict):
-                    yield {k: v.to(self.device, non_blocking=self.cfg.DATASET.pin_memory) for k, v in batch.items()}
-                else:
-                    yield [x.to(self.device, non_blocking=self.cfg.DATASET.pin_memory) for x in batch]
+            for batch, label in loader:
+                yield ({k: v.to(self.device, non_blocking=self.cfg.DATASET.pin_memory) for k, v in batch.items()},
+                       label.to(self.device, non_blocking=self.cfg.DATASET.pin_memory))
 
                 # For aviod warmup(i.e. 1st iteration)
                 if pbar and getattr(self, 'pbar', None) is None:
@@ -297,12 +300,8 @@ class Trainer():
                 os.remove(to_removed)
 
     def train(self):
-        # default value for loss, metrics
         ema_beta = 0.5 ** (self.batch_gpu * self.num_gpus / (10 * 1000))
-        cs = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, self.batch_gpu, 1).unbind(0)
-        cs = {cn: c for cn, c in zip(self.g_.classes, cs)}
-        targets = self.cfg.classes
-        self.train_ds.update_targets(targets)
+        self.train_ds.update_targets(self.cfg.classes)
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
             batch_size=self.batch_gpu,
@@ -315,10 +314,10 @@ class Trainer():
         loader = self.sample_forever(train_loader, pbar=(self.local_rank == 0))
 
         for i in range(self.start_iter, self.cfg.TRAIN.iteration):
-            data = next(loader)
+            data, label = next(loader)
 
-            self.Dmain(data, r1_reg=(self.cfg.TRAIN.R1.every != -1 and i % self.cfg.TRAIN.R1.every == 0))
-            self.Gmain(data, pl_reg=(self.cfg.TRAIN.PPL.every != -1 and i % self.cfg.TRAIN.PPL.every == 0))
+            self.Dmain(data, label, r1_reg=(self.cfg.TRAIN.R1.every != -1 and i % self.cfg.TRAIN.R1.every == 0))
+            self.Gmain(data, label, pl_reg=(self.cfg.TRAIN.PPL.every != -1 and i % self.cfg.TRAIN.PPL.every == 0))
 
             self.ema(ema_beta=ema_beta)
             self.reduce_stats()
@@ -328,7 +327,7 @@ class Trainer():
                 self.update_ada()
 
             if self.fid_tracker is not None and (i == 0 or (i + 1) % self.cfg.EVAL.FID.every == 0):
-                fids = self.fid_tracker(self.g_ema.classes, self.infer_fn, (i + 1), save=(self.local_rank == 0))
+                fids = self.fid_tracker(self.cfg.classes[:2], self.infer_fn, (i + 1), save=(self.local_rank == 0))
                 self.stats.update({f'FID/{c}': torch.tensor(v, device=self.device) for c, v in fids.items()})
 
             if (i + 1) % self.cfg.TRAIN.CKPT.every == 0:
@@ -342,7 +341,7 @@ class Trainer():
 
         self.clear()
 
-    def Dmain(self, data, r1_reg=False):
+    def Dmain(self, data, label, r1_reg=False):
         """ GAN loss & (opt.)R1 regularization """
         self.g.requires_grad_(False)
         self.d.requires_grad_(True)
@@ -356,17 +355,19 @@ class Trainer():
         real = torch.cat([data[c] for c in self.cfg.classes], dim=cat_dim).detach().requires_grad_(r1_reg)
 
         z = torch.randn(data[self.cfg.classes[0]].shape[0], self.g_.z_dim, device=self.device)
+        one_hot = torch.nn.functional.one_hot(label, num_classes=self.num_classes)
         with autocast(enabled=self.autocast):
-            fake_imgs, _ = self.g(z, None)
+            fake_imgs = self.g(z, one_hot)
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
 
             cat_dim, c = 1, None
             if self.d_.c_dim > 0:
                 cat_dim = 0
-                c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+                fixed_c = torch.eye(self.d_.c_dim, device=z.device)[:2].unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+                c = torch.cat([fixed_c, one_hot], dim=0)
 
-            fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
+            fake = torch.cat([aug_fake_imgs[k] for k in self.cfg.classes], dim=cat_dim)
             real_pred = self.d(real, c=c)
             fake_pred = self.d(fake, c=c)
             real_loss = torch.nn.functional.softplus(-real_pred).mean()
@@ -391,51 +392,74 @@ class Trainer():
 
         d_loss = loss_Dmain + loss_Dr1
         self.d.zero_grad(set_to_none=True)
-        # d_loss.backward()
-        # for param in self.d_.parameters():
-        #     if param.grad is not None:
-        #         torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-        # self.d_optim.step()
         self.d_scaler.scale(d_loss).backward()
         self.d_scaler.step(self.d_optim)
         self.d_scaler.update()
 
-    def Gmain(self, data, pl_reg=False):
+    def Gmain(self, data, label, pl_reg=False):
         self.g.requires_grad_(True)
         self.d.requires_grad_(False)
         ref_c = self.cfg.classes[0]
 
         z = torch.randn(data[ref_c].shape[0], self.g_.z_dim, device=self.device)
+        one_hot = torch.nn.functional.one_hot(label, self.num_classes)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
-            fake_imgs, feats = self.g(z, None, return_feat_res=None)
+            fake_imgs = self.g(z, one_hot)
 
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
             cat_dim, c = 1, None
             if self.d_.c_dim > 0:
                 cat_dim = 0
-                c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+                fixed_c = torch.eye(self.d_.c_dim, device=z.device)[:2].unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+                c = torch.cat([fixed_c, one_hot], dim=0)
 
-            fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
+            fake = torch.cat([aug_fake_imgs[k] for k in self.cfg.classes], dim=cat_dim)
             fake_pred = self.d(fake, c=c)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
             loss_Gmain = loss_Gmain + gan_loss
 
             # recontruction loss
-            for c in self.g_.classes[1:]:
-                rec_targets = torch.nn.functional.interpolate(fake_imgs[ref_c], self.train_ds.mask_size[c], mode='bicubic').detach()
-                loss_rec = self.rec_loss(rec_targets, fake_imgs[c][(slice(None), slice(None)) + self.train_ds.mask_slice[c]])
-                self.stats[f'loss/G-reconstruction-{c}'] = loss_rec.detach()
-                loss_Gmain = loss_Gmain + loss_rec
+            ref = fake_imgs['ref'].detach()
+
+            # face: ref -> target
+            x1, y1, x2, y2 = self.train_ds.target_box
+            rec_ref_target = torch.nn.functional.l1_loss(
+                fake_imgs['target'][:, :, y1:y2, x1:x2],
+                torch.nn.functional.interpolate(ref, scale_factor=self.train_ds.target_ratio, mode='bicubic'))
+            loss_Gmain = loss_Gmain + rec_ref_target
+            self.stats[f'loss/G-face->target'] = rec_ref_target.detach()
+
+            # face: ref -> trans
+            loss = 0
+            for r, t, l in zip(ref, fake_imgs['trans'], label):
+                x1, y1, x2, y2 = self.facebox[int(l) - 2]
+                loss = loss + torch.abs(
+                    torch.nn.functional.interpolate(r[None, ...], (y2 - y1, x2 - x1), mode='bicubic')[0] - t[:, y1:y2, x1:x2]).mean()
+            rec_ref_trans = loss / label.shape[0]
+            loss_Gmain = loss_Gmain + rec_ref_trans
+            self.stats[f'loss/G-face->trans'] = rec_ref_trans.detach()
+
+            # human: trans -> target
+            loss = 0
+            ref = fake_imgs['trans'].detach()
+            for r, t, l in zip(ref, fake_imgs['target'], label):
+                x1, y1, x2, y2 = self.targetbox[int(l) - 2]
+                x1_, y1_, x2_, y2_ = self.transbox[int(l) - 2]
+                loss = loss + torch.abs(
+                    torch.nn.functional.interpolate(r[:, y1_:y2_, x1_:x2_].unsqueeze(0), (y2 - y1, x2 - x1), mode='bicubic')[0] - t[:, y1:y2, x1:x2]).mean()
+            rec_trans_target = loss / label.shape[0]
+            loss_Gmain = loss_Gmain + rec_trans_target
+            self.stats[f'loss/G-reconstruction-trans->target'] = rec_trans_target.detach()
 
         if pl_reg:
             cfg = self.cfg.TRAIN.PPL
             pl_bs = max(1, self.batch_gpu // cfg.bs_shrink)
             with autocast(enabled=self.autocast):
-                fake_imgs, _, ws = self.g(z[:pl_bs], None, return_dlatent=pl_reg)
+                fake_imgs, ws = self.g(z[:pl_bs], one_hot[:pl_bs], return_dlatent=pl_reg)
                 path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
                     fake_imgs[ref_c],
                     ws[ref_c],
@@ -481,14 +505,16 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
-            ds = get_dataset(self.cfg, split='test', xflip=False, num_items=self.cfg.n_sample)
+            ds = get_dataset(self.cfg, split='test', xflip=False, num_items=self.cfg.n_sample, target_ratio=0.125)
             ds.update_targets(self.cfg.classes)
             loader = torch.utils.data.DataLoader(
                 ds,
                 batch_size=self.cfg.n_sample // self.num_gpus,
                 sampler=get_sampler(ds, eval=True, num_gpus=self.num_gpus)
             )
-            self._samples = {k: v.to(self.device) for k, v in next(iter(loader)).items()}
+            data, label = next(iter(loader))
+            self._samples = {k: v.to(self.device) for k, v in data.items()}
+            self._sample_labels = torch.nn.functional.one_hot(label.to(self.device), num_classes=self.num_classes)
             self.real_samples = {k: self.all_gather(v) for k, v in self._samples.items()}
             _samples = [self.real_samples[c] for c in self.cfg.classes]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
@@ -502,7 +528,7 @@ class Trainer():
 
         z = torch.randn([self._samples[self.cfg.classes[0]].shape[0], self.g_ema.z_dim], device=self.device)
         with torch.no_grad():
-            _fake_imgs, _ = self.g_ema(z, None, return_feat_res=None)
+            _fake_imgs = self.g_ema(z, self._sample_labels)
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():

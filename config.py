@@ -27,7 +27,6 @@ _C.DATASET.num_workers = 4
 _C.MODEL = CN()
 _C.MODEL.z_dim = 512
 _C.MODEL.w_dim = 512
-_C.MODEL.mode = ''  # ['split', 'join']
 
 _C.MODEL.MAPPING = CN()
 _C.MODEL.MAPPING.num_layers = 8

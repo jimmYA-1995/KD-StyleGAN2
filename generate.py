@@ -4,27 +4,11 @@ import torch
 
 def image_generator(model, batch_size, target_class, ds=None, device='cuda', num_gpus=1):
     assert ds is None
-    # ds.update_targets(['face', 'masked_face'])
-    # loader = torch.utils.data.DataLoader(
-    #     ds,
-    #     batch_size=batch_size,
-    #     sampler=get_sampler(ds, eval=True, num_gpus=num_gpus),
-    #     pin_memory=False,
-    #     num_workers=3,
-    #     worker_init_fn=ds.__class__.worker_init_fn
-    # )
 
     # Infinite sampling
-    epoch = 0
     while True:
-        # if num_gpus > 1:
-        #     loader.sampler.set_epoch(epoch)
-
-        # for batch in loader:
-        #     data = {k: v.to(device) for k, v in batch.items()}
         z = torch.randn([batch_size, model.z_dim], device=device)
-        yield model.inference(z, None, target_class)
-        # epoch += 1
+        yield model.inference(z, target_class)
 
 
 if __name__ == '__main__':

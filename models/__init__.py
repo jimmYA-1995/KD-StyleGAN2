@@ -4,13 +4,12 @@ from .networks import *
 __all__ = ['Generator', 'Discriminator', 'create_model']
 
 
-def create_model(cfg, device=None, eval_only=False):
+def create_model(cfg, num_clases, device=None, eval_only=False):
     g = Generator(
         cfg.MODEL.z_dim,
         cfg.MODEL.w_dim,
-        cfg.classes,
+        num_clases,
         cfg.resolution,
-        mode=cfg.MODEL.mode,
         mapping_kwargs=cfg.MODEL.MAPPING,
         synthesis_kwargs=dict(cfg.MODEL.SYNTHESIS),
     ).to(device)

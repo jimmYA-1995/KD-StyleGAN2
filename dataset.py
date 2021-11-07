@@ -3,14 +3,15 @@ import json
 import pickle
 from collections import namedtuple
 from pathlib import Path
-from typing import List, Set
+from typing import List, Dict
 
+import cv2
 import numpy as np
 import torch
 import skimage.io as io
+from PIL import Image
 from torch.utils import data
 from torchvision import transforms
-from PIL import Image
 
 from config import configurable
 from misc import cords_to_map, draw_pose_from_cords, ffhq_alignment
@@ -35,7 +36,6 @@ def get_dataset(cfg, **override_kwargs):
 def get_sampler(ds, eval=False, num_gpus=1):
     """ Using state to decide common dataloader kwargs. """
     # TODO workers kwargs
-    assert ds.targets, "Please call ds.update_targets([desired_targets])"
     if num_gpus > 1:
         sampler = torch.utils.data.DistributedSampler(
             ds, shuffle=(not eval), drop_last=(not eval))
@@ -45,56 +45,6 @@ def get_sampler(ds, eval=False, num_gpus=1):
         sampler = torch.utils.data.SequentialSampler(ds)
 
     return sampler
-
-
-class DefaultDataset(data.Dataset):
-    def __init__(self, cfg, split='train'):
-        assert len(cfg.roots) == len(cfg.source) == 1
-        assert split in ['train', 'val', 'test', 'all']
-        self.cfg = cfg
-        self.root = Path(cfg.roots[0]).expanduser()
-        self.face_dir = None
-        self.fileIDs = None
-        self.idx = None
-        self.resolution = cfg.resolution
-        self.split = split
-        self.xflip = cfg.xflip
-        self._img_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(cfg.mean, cfg.std, inplace=True),
-        ])
-        self._mask_transform = transforms.ToTensor()
-
-    def __len__(self):
-        return len(self.fileIDs) * 2 if self.xflip else len(self.fileIDs)
-
-    def maybe_xflip(self, img):
-        """ xflip if xflip enabled and index > len(ds) / 2,
-            no op. otherwise
-        """
-        assert isinstance(img, Image.Image) and self.idx is not None
-        if not self.xflip or self.idx < len(self.fileIDs):
-            return img
-
-        return img.transpose(method=Image.FLIP_LEFT_RIGHT)
-
-    def img_transform(self, img):
-        img = self.maybe_xflip(img)
-        return self._img_transform(img)
-
-    def mask_transform(self, img):
-        img = self.maybe_xflip(img)
-        return self._mask_transform(img)
-
-    @classmethod
-    def worker_init_fn(cls, worker_id):
-        """ For reproducibility & randomness in multi-worker mode """
-        worker_seed = torch.initial_seed() % 2**32
-        np.random.seed(worker_seed)
-        worker_info = torch.utils.data.get_worker_info()
-        dataset = worker_info.dataset
-        if hasattr(dataset, 'rng'):
-            dataset.rng = np.random.default_rng(worker_seed)
 
 
 @register
@@ -117,9 +67,11 @@ class DeepFashion(data.Dataset):
         self.res = resolution
         self.xflip = xflip
         # all targets: ['face', 'human', 'heatmap', 'masked_face', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
-        self.available_targets = ['1', '1/4', '1/8']
-        self.mask_slice = {}
-        self.mask_size = {}
+        self.available_targets = ['face', 'human', 'face_lm']
+        face_ratio = float(sources[1].split('_')[-1])
+        face_size = int(resolution * face_ratio)
+        self.mask_slice = (slice(16, 16 + face_size), slice((resolution - face_size) // 2, (resolution + face_size) // 2))
+        self.mask_size = (face_size, face_size)
         self.targets = []
 
         root = Path(roots[0]).expanduser()
@@ -132,23 +84,14 @@ class DeepFashion(data.Dataset):
         self.small = DeepFashion.FacePosition(44.56, 3.32, 517.075, 26.655, 100.36, 17.22)
         self.rng = np.random.default_rng()
 
-        # subdirectory
         self.src = sources[0]
-        self.tgt_dir = {
-            '1': root / self.src / 'face',
-            '1/4': root / f'r{self.res}/fixedface_unalign1.0_0.25',
-            '1/8': root / f'r{self.res}/fixedface_unalign1.0_0.125',
-        }
-        for k in self.tgt_dir.keys():
-            face_size = int(resolution * float(eval(k)))
-            self.mask_slice[k] = (slice(16, 16 + face_size), slice((resolution - face_size) // 2, (resolution + face_size) // 2))
-            self.mask_size[k] = (face_size, face_size)
-
         self.face_dir = root / self.src / 'face'
+        self.human_dir = root / f'r{self.res}' / sources[1]
         self.kp_dir = root / 'kp_heatmaps/keypoints'
         self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
-        assert self.face_dir.exists() and self.kp_dir.exists()
+        assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
+        assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.kp_dir.glob('*.pkl'))
 
         total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
@@ -202,12 +145,9 @@ class DeepFashion(data.Dataset):
             img = io.imread(self.face_dir / f'{fileID}.png')
             data['face'] = self.transform(img)
 
-        for tgt, dir in self.tgt_dir.items():
-            if tgt not in self.targets:
-                continue
-
-            img = io.imread(dir / f'{fileID}.png')
-            data[tgt] = self.transform(img)
+        if 'human' in self.targets:
+            img = io.imread(self.human_dir / f'{fileID}.png')
+            data['human'] = self.transform(img)
 
         if 'masked_face' in self.targets:
             assert 'face' in data, "require face targets to make masked_face"
@@ -270,15 +210,156 @@ class DeepFashion(data.Dataset):
         return data
 
 
-if __name__ == "__main__":
-    from config import get_cfg_defaults
-    cfg = get_cfg_defaults()
-    ds = get_dataset(cfg, split='train', xflip=False)
-    print(len(ds))
-    ds.update_targets(["face", "human", "heatmap"])
-    loader = torch.utils.data.DataLoader(
-        ds,
-        batch_size=2
-    )
-    data = next(iter(loader))
-    print("finish")
+@register
+class DeepFashion_TS(data.Dataset):
+    """ DeepFashion dataset with discrete condition for translation & scaling
+        Target is 1/8 fixed face position:
+        [x1, y1, x2, y2] = [(0.5 - 0.125) / 2, 0.125 * (1 - 0.5), (0.5 + 0.125) / 2, 0.125 * (1 + 0.5)]
+        the label is: 0(face), 1(target), >1, >2, <1, <2, ^1, v1, v2, x1.5, x2.0
+        total 10 classes.
+        class2 to class9 will translate (unit: 32 pixels) & scale
+    """
+    @configurable()
+    def __init__(
+        self,
+        resolution: int = 256,
+        roots: List[str] = None,
+        sources: List[str] = None,
+        split: str = 'all',
+        xflip: bool = False,
+        num_items: int = float('inf'),
+        target_ratio: float = 0.125
+    ):
+        assert roots is not None and sources is not None
+        assert len(roots) == 1, "Only support 1 data root directory. List is just for compatibility"
+        assert len(sources) == 2, "assume source 1 for ref(face), 2 for target(human)"
+        try:
+            face_ratio = float(sources[1].split('_')[-1])
+            assert target_ratio == face_ratio
+        except ValueError:
+            print("Warning: Cannot infer target ratio via pasing folder name."
+                  "Please make sure the target ratio is correct")
+
+        self.res = resolution
+        self.xflip = xflip
+        self.target_ratio = target_ratio
+        self.affineMs = None
+        self.define_transformation()
+        self.num_classes = 2 + len(self.affineMs)
+        self.available_targets = ["ref", "target", "trans"]
+        self.targets = []
+
+        root = Path(roots[0]).expanduser()
+        split_map = pickle.load(open(root / 'split.pkl', 'rb'))
+        self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
+        self.fileIDs.sort()
+
+        self.ref_dir = root / sources[0] / 'face'
+        self.target_dir = root / f'r{self.res}' / sources[1]
+        assert all(dir for dir in [self.ref_dir, self.target_dir])
+        assert all(set(self.fileIDs) <= set(p.stem for p in dir.glob('*.png'))
+                   for dir in [self.ref_dir, self.target_dir])
+
+        total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
+        self._num_items = min(total, num_items)
+
+    @classmethod
+    def from_config(cls, cfg):
+        return {
+            'resolution': cfg.resolution,
+            'roots': cfg.DATASET.roots,
+            'sources': cfg.DATASET.sources,
+            'xflip': cfg.DATASET.xflip
+        }
+
+    def __len__(self):
+        return self._num_items
+
+    def update_targets(self, targets: List[str]) -> None:
+        if not all([t in self.available_targets for t in targets]):
+            raise ValueError(f"Some of desire targets is not available. "
+                             f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
+        self.targets = targets
+
+    @classmethod
+    def worker_init_fn(cls, worker_id):
+        """ For reproducibility & randomness in multi-worker mode """
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+
+    def define_transformation(self):
+        """ Define mapping from label index to transformation. Offset by face and target class.
+            0(face), 1(target), >1, >2, <1, <2, ^1, v1, v2, x1.5, x2.0
+        """
+        face_size = int(self.res * self.target_ratio)
+        self.target_box = [(self.res - face_size) // 2, int(face_size * (1 - 0.5)), (self.res + face_size) // 2, int(face_size * (1 + 0.5))]
+        u = face_size // 2  # translation unit
+        self.affineMs = [
+            np.array([[1, 0, u], [0, 1, 0]], dtype=np.float32),
+            np.array([[1, 0, u * 2], [0, 1, 0]], dtype=np.float32),
+            np.array([[1, 0, -u], [0, 1, 0]], dtype=np.float32),
+            np.array([[1, 0, -(u * 2)], [0, 1, 0]], dtype=np.float32),
+            np.array([[1, 0, 0], [0, 1, -u]], dtype=np.float32),
+            np.array([[1, 0, 0], [0, 1, u]], dtype=np.float32),
+            np.array([[1, 0, 0], [0, 1, u * 2]], dtype=np.float32),
+            cv2.getRotationMatrix2D((self.res // 2, face_size), 0, 1.5),
+            cv2.getRotationMatrix2D((self.res // 2, face_size), 0, 2.0)
+        ]
+
+        # pre-calculate face box after translation or scaling
+        x1, y1, x2, y2 = self.target_box
+        query_points = np.array([[x1, y1, 1], [x2, y2, 1], [0, 0, 1], [self.res - 1, self.res - 1, 1]], dtype=np.float32).T[None, ...]
+        homogenous_vector = np.array([[0, 0, 1]], dtype=np.float32)
+        square_affineMs = [np.concatenate([M, homogenous_vector.copy()]) for M in self.affineMs]
+        batch_affineMs = np.stack(square_affineMs, axis=0)
+        affined_points = (batch_affineMs @ query_points).astype(int)[:, :2, :]
+        self.facebox = affined_points[..., :2].transpose(0, 2, 1).reshape(-1, 4)  # [N, 4] for (x1', y1', x2', y2')
+
+        boundary = np.array([[0, 0],
+                             [self.res, self.res]], dtype=np.int32)[None, ...]
+        transbox = affined_points[..., 2:].transpose(0, 2, 1)
+        transbox[:, 0] = np.maximum(boundary[:, 0], transbox[:, 0])
+        transbox[:, 1] = np.minimum(boundary[:, 1], transbox[:, 1])
+        self.transbox = transbox.reshape(-1, 4)
+
+        # inverse query
+        query_points = np.array([[0, 0, 1], [self.res - 1, self.res - 1, 1]], dtype=np.float32).T[None, ...]
+        batch_affineMs_inv = np.stack([np.linalg.inv(M) for M in square_affineMs], axis=0)
+        targetbox = (batch_affineMs_inv @ query_points).astype(int)[:, :2, :].transpose(0, 2, 1)
+        targetbox[:, 0] = np.maximum(boundary[:, 0], targetbox[:, 0])
+        targetbox[:, 1] = np.minimum(boundary[:, 1], targetbox[:, 1])
+        self.targetbox = targetbox.reshape(-1, 4)
+
+    def transform(self, img: np.ndarray, xflip: bool, affine=None, channel_first=True) -> torch.Tensor:
+        """ normalize, xflip, transform, to Tensor """
+        img = (img.copy().astype(np.float32) - 127.5) / 127.5
+        if xflip:
+            img = img[:, ::-1, :]
+
+        if affine is not None:
+            img = cv2.warpAffine(img, affine, (self.res, self.res), borderValue=(1, 1, 1))
+
+        if channel_first:
+            img = img.transpose(2, 0, 1)
+
+        return torch.from_numpy(img.copy())
+
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        data = {}
+        fileID = self.fileIDs[idx % len(self.fileIDs)]
+        xflip = self.xflip and idx > len(self.fileIDs)
+        if 'ref' in self.targets:
+            data['ref'] = self.transform(io.imread(self.ref_dir / f'{fileID}.png'), xflip=xflip)
+
+        trans_idx = np.random.randint(len(self.affineMs))
+        label = trans_idx + 2  # offset by ref_class and target class
+
+        if any(x in self.targets for x in ['target', 'trans']):
+            target = io.imread(self.target_dir / f'{fileID}.png')
+            if 'target' in self.targets:
+                data['target'] = self.transform(target, xflip=xflip)
+
+            if 'trans' in self.targets:
+                data['trans'] = self.transform(target, xflip=xflip, affine=self.affineMs[trans_idx])
+
+        return data, label

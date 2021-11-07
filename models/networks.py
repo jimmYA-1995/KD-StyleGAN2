@@ -139,7 +139,9 @@ class SynthesisNetwork(nn.Module):
 
             img = getattr(self, f'b{res}_trgb')(x, ws[:, res_log2 * 2 - 3], skip=img)
 
-        return img, feats
+        if return_feat_res:
+            return img, feats
+        return img
 
 
 class Generator(nn.Module):
@@ -147,79 +149,52 @@ class Generator(nn.Module):
         self,
         z_dim: int,                        # Input latent(Z) dimension.
         w_dim: int,                        # Disentangled latent(W) dimension.
-        classes: List[str],                # List of class name
+        num_classes: int,                  # The number of class: ref + target + #translation
         img_resolution: int,               # Output resolution.
-        mode: str = 'split',               # split teacher & student
         mapping_kwargs: dict = {},         # Arguments for MappingNetwork.
         synthesis_kwargs: dict = {},       # Arguments for SynthesisNetwork.
     ):
-        assert mode in ['split', 'joint']
         super(Generator, self).__init__()
 
+        self.branches = ['ref', 'target', 'trans']
         self.z_dim = z_dim
         self.w_dim = w_dim
-        self.classes = classes
+        self.num_classes = num_classes
         self.img_resolution = img_resolution
-        self.mode = mode
-
         self.num_layers = int(np.log2(img_resolution)) * 2 - 2
 
-        synthesis_args = (w_dim, img_resolution)
+        self.synthesis = SynthesisNetwork(w_dim, img_resolution, const=True, **synthesis_kwargs)
+        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=self.num_classes, w_dim=w_dim, **mapping_kwargs)
+        self.img_channels = self.synthesis.img_channels
+        self.block_resolutions = self.synthesis.block_resolutions
+        self.channel_dict = self.synthesis.channel_dict
 
-        if mode == 'joint':
-            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
-            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=len(classes), w_dim=w_dim, **mapping_kwargs)
-            self.mapping = nn.ModuleDict([[c, mapping1] for c in classes])
-            self.synthesis = nn.ModuleDict([[c, synthesis1] for c in classes])
-        else:
-            assert len(classes) == 2, "Only support 2 classes"
-            # 1: teacher Network, 2: student Network
-            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
-            synthesis2 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
-            # self.heatmap_shape = synthesis2.pose_encoder.heatmap_shape
-            mapping1 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
-            mapping2 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
-            self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping2]])
-            self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis2]])
-
-        self.img_channels = synthesis1.img_channels
-        self.block_resolutions = synthesis1.block_resolutions
-        self.channel_dict = synthesis1.channel_dict
-
-    def forward(self, z, pose, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
-        # TODO enable style mixing training
+    def forward(self, z, c, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
         assert z.shape[1] == self.z_dim
         z = normalize_2nd_moment(z.to(torch.float32))
+        zs = z.repeat(len(self.branches), 1)
 
-        if self.mode == 'joint':
-            c = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
-            z = z.repeat(len(self.classes), 1)
-            ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(len(self.classes))
-            ws = {class_name: w for class_name, w in zip(self.classes, ws)}
-        else:  # split
-            ws = {}
-            for class_name, mapping in self.mapping.items():
-                ws[class_name] = mapping(z, broadcast=self.num_layers, normalize_z=False)
+        fixed_c = torch.eye(self.num_classes, device=z.device)[:2].unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+        cs = torch.cat([fixed_c, c], dim=0)
+        ws = self.mapping(zs, cs, broadcast=self.num_layers, normalize_z=False).chunk(len(self.branches))
+        ws = {branch_name: w for branch_name, w in zip(self.branches, ws)}
 
         img = {}
-        for i, (class_name, synthesis) in enumerate(self.synthesis.items()):
-            p = pose if i > 0 else None
-            img[class_name], _ = synthesis(ws[class_name], pose=p)
+        for branch_name in self.branches:
+            img[branch_name] = self.synthesis(ws[branch_name])
 
         if return_dlatent:
-            return img, _, ws
-        return img, _
+            return img, ws
+        return img
 
     @torch.no_grad()
-    def inference(self, z, pose, target_class):
-        """ forward only through target class"""
+    def inference(self, z, target_class):
         assert z.shape[1] == self.z_dim
-        assert target_class in self.classes
-        c = None
-        if self.mode == 'joint':
-            c = torch.eye(len(self.classes), device=z.device)[self.classes.index(target_class)][None, ...].repeat(z.shape[0], 1)
-        w = self.mapping[target_class](z, c=c, broadcast=self.num_layers)
-        img, _ = self.synthesis[target_class](w, pose=pose)
+        assert target_class in self.branches[:2]
+        c = torch.eye(self.num_classes, device=z.device)[self.branches.index(target_class)].unsqueeze(0).repeat(z.shape[0], 1)
+
+        w = self.mapping(z, c=c, broadcast=self.num_layers)
+        img = self.synthesis(w)
         return img
 
 
