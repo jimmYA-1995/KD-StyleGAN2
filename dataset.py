@@ -47,7 +47,7 @@ def get_sampler(ds, eval=False, num_gpus=1):
     return sampler
 
 
-@register
+# @register
 class DeepFashion(data.Dataset):
     FacePosition = namedtuple('FacePosition', 'X_mean X_std cx_mean cx_std cy_mean cy_std')
     FacePosition.__qualname__ = "DeepFashion.FacePosition"
@@ -210,7 +210,7 @@ class DeepFashion(data.Dataset):
         return data
 
 
-@register
+# @register
 class DeepFashion_TS(data.Dataset):
     """ DeepFashion dataset with discrete condition for translation & scaling
         Target is 1/8 fixed face position:
@@ -361,5 +361,92 @@ class DeepFashion_TS(data.Dataset):
 
             if 'trans' in self.targets:
                 data['trans'] = self.transform(target, xflip=xflip, affine=self.affineMs[trans_idx])
+
+        return data, label
+
+# random patch dataset
+@register
+class DeepFashion_Patch(data.Dataset):
+    """ Dataset with target & patches. The resolution of patch depends on args
+    """
+    @configurable()
+    def __init__(
+        self,
+        resolution: int = 256,
+        roots: List[str] = None,
+        sources: List[str] = None,
+        split: str = 'all',
+        xflip: bool = False,
+        num_items: int = float('inf'),
+    ):
+        assert roots is not None and sources is not None
+        assert len(roots) == 1, "Only support 1 data root directory. List is just for compatibility"
+        assert len(sources) == 1, "assume 1 source for human"
+
+        self.res = resolution
+        self.xflip = xflip
+        self.num_classes = 5  # exclude target class
+
+        s = resolution // 2
+        self.plocation = [
+            (slice(None, s), slice((resolution - s) // 2, (resolution + s) // 2)),
+            (slice((resolution - s) // 2, (resolution + s) // 2), slice((resolution - s) // 2, (resolution + s) // 2)),
+            (slice(s, None), slice((resolution - s) // 2, (resolution + s) // 2)),
+            (slice(None, s), slice(None, s)),
+            (slice(None, s), slice(s, None))
+        ]
+
+        root = Path(roots[0]).expanduser()
+        split_map = pickle.load(open(root / 'split.pkl', 'rb'))
+        self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
+        self.fileIDs.sort()
+
+        self.target_dir = root / f'r{self.res}' / sources[0]
+        assert self.target_dir and set(self.fileIDs) <= set(p.stem for p in self.target_dir.glob('*.png'))
+
+        total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
+        self._num_items = min(total, num_items)
+
+    @classmethod
+    def from_config(cls, cfg):
+        return {
+            'resolution': cfg.resolutions[0],
+            'roots': cfg.DATASET.roots,
+            'sources': cfg.DATASET.sources,
+            'xflip': cfg.DATASET.xflip
+        }
+
+    def __len__(self):
+        return self._num_items
+
+    @classmethod
+    def worker_init_fn(cls, worker_id):
+        """ For reproducibility & randomness in multi-worker mode """
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+
+    def transform(self, img: np.ndarray, xflip: bool, affine=None, channel_first=True) -> torch.Tensor:
+        """ normalize, xflip, transform, to Tensor """
+        img = (img.copy().astype(np.float32) - 127.5) / 127.5
+        if xflip:
+            img = img[:, ::-1, :]
+
+        if affine is not None:
+            img = cv2.warpAffine(img, affine, (self.res, self.res), borderValue=(1, 1, 1))
+
+        if channel_first:
+            img = img.transpose(2, 0, 1)
+
+        return torch.from_numpy(img.copy())
+
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        data = {}
+        fileID = self.fileIDs[idx % len(self.fileIDs)]
+        xflip = self.xflip and idx > len(self.fileIDs)
+
+        img = io.imread(self.target_dir / f'{fileID}.png')
+        data['target'] = self.transform(img, xflip=xflip)
+        label = np.random.randint(self.num_classes) + 1  # offset by target class
+        data['patch'] = self.transform(img[self.plocation[label - 1]], xflip=xflip)
 
         return data, label

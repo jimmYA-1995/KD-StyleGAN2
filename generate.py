@@ -8,7 +8,8 @@ def image_generator(model, batch_size, target_class, ds=None, device='cuda', num
     # Infinite sampling
     while True:
         z = torch.randn([batch_size, model.z_dim], device=device)
-        yield model.inference(z, target_class)
+        c = torch.nn.functional.one_hot(torch.zeros([z.shape[0]], device=device, dtype=torch.int64), model.num_classes)
+        yield model.inference(z, c)
 
 
 if __name__ == '__main__':

@@ -4,12 +4,15 @@ from .networks import *
 __all__ = ['Generator', 'Discriminator', 'create_model']
 
 
-def create_model(cfg, num_clases, device=None, eval_only=False):
+def create_model(cfg, num_classes, device=None, eval_only=False):
+    assert len(cfg.classes) == 2
+
+    branch_res = {c: r for c, r in zip(cfg.classes, cfg.resolutions)}
     g = Generator(
         cfg.MODEL.z_dim,
         cfg.MODEL.w_dim,
-        num_clases,
-        cfg.resolution,
+        num_classes + 1,  # include target class
+        branch_res,
         mapping_kwargs=cfg.MODEL.MAPPING,
         synthesis_kwargs=dict(cfg.MODEL.SYNTHESIS),
     ).to(device)
@@ -17,7 +20,8 @@ def create_model(cfg, num_clases, device=None, eval_only=False):
     if eval_only:
         return g.eval()
 
-    d = Discriminator(cfg.resolution, **cfg.MODEL.DISCRIMINATOR).to(device)
+    igm_resolutions = [branch_res[c] for c in cfg.classes]
+    d = Discriminator(igm_resolutions, num_classes, **cfg.MODEL.DISCRIMINATOR).to(device)
     return g, d
 
 

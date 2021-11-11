@@ -1,13 +1,14 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-TS'
+name: 'cond-br'
 description: >
-    ref(face), target(1/8), and discrete class for manually defined Translation & Scaling. with reconstruction loss
+    conditonal branch Discriminator. target(1/8), and discrete class for manually defined patch. with reconstruction loss
 n_sample: 64
-resolution: 256
+resolutions:
+- 256
+- 128
 classes:
-- 'ref'
 - 'target'
-- 'trans'
+- 'patch'
 
 ADA:
   enabled: false  # ADA transformation is ambiguous with our translation labels
@@ -18,11 +19,10 @@ ADA:
   # KWARGS:
 
 DATASET:
-  name: DeepFashion_TS
+  name: DeepFashion_Patch
   roots:
     - '~/data/deepfashion'
   sources:
-    - 'unalign_1.0'                 # directory of face image
     - 'fixedface_unalign1.0_0.125'
   xflip: true
   num_workers: 4
@@ -48,23 +48,21 @@ MODEL:
     feature_types: 'relu'
 
   DISCRIMINATOR:
-    img_channels: [3]
-    c_dim: 11
     branch_res: 32
     top_res: 4
     channel_base: 32768
 
 
 TRAIN:
-  iteration: 300000
+  iteration: 20
   batch_gpu: 4
   lrate: 0.002
   lrate_atten: 0.002
   R1:
-    every: 16
+    every: -1
     gamma: 10
   PPL:
-    every: 8
+    every: -1
     gain: 2
     bs_shrink: 2
   style_mixing_prob: 0.0
@@ -73,7 +71,7 @@ TRAIN:
     every: 6250
     max_keep: -1
   SAMPLE:
-    every: 6250
+    every: 10
 
 EVAL:
   metrics: 'fid'
@@ -81,6 +79,6 @@ EVAL:
   FID:
     every: 6250
     batch_gpu: 64
-    n_sample: 50000
-    inception_cache: 'inception_cache.pkl'
+    n_sample: 500
+    inception_cache: ''
 

@@ -74,7 +74,6 @@ class FIDTracker():
             ds = get_dataset(cfg, split='all')
 
             def generator(ds, target_class):
-                ds.update_targets([target_class])
                 num_items = min(len(ds), 50000)
                 item_subset = [(i * num_gpus + rank) % num_items
                                for i in range((num_items - 1) // num_gpus + 1)]
@@ -87,7 +86,7 @@ class FIDTracker():
                 for batch, _ in loader:
                     yield batch[target_class].to(self.device)
 
-            for c in self.classes:
+            for c in self.classes[:1]:
                 self.log.info(f"Extract real features from '{c}'")
                 t = time.time()
                 real_means[c], real_covs[c] = self.extract_features(generator(ds, c))
