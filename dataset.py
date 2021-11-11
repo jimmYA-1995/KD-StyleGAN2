@@ -237,7 +237,7 @@ class DeepFashion_TS(data.Dataset):
             face_ratio = float(sources[1].split('_')[-1])
             assert target_ratio == face_ratio
         except ValueError:
-            print("Warning: Cannot infer target ratio via pasing folder name."
+            print("Warning: Cannot infer target ratio via parsing folder name."
                   "Please make sure the target ratio is correct")
 
         self.res = resolution
