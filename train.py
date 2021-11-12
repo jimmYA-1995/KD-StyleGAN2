@@ -326,7 +326,7 @@ class Trainer():
             if (i + 1) % self.cfg.TRAIN.CKPT.every == 0:
                 self.save_to_checkpoint(i + 1)
 
-            if (i + 1) % self.cfg.TRAIN.SAMPLE.every == 0:
+            if i == 0 or (i + 1) % self.cfg.TRAIN.SAMPLE.every == 0:
                 self.sampling(i + 1)
 
             if self.local_rank == 0:
@@ -488,8 +488,8 @@ class Trainer():
             self.tgt_c = torch.nn.functional.one_hot(torch.zeros([self.sample_z.shape[0]], device=self.device, dtype=torch.int64), self.num_classes + 1)
             self.patch_c = torch.nn.functional.one_hot(torch.arange(self.num_classes, device=self.device, dtype=torch.int64) + 1, self.num_classes + 1).repeat(self.sample_z.shape[0], 1)
         with torch.no_grad():
-            target = self.g_ema(self.sample_z, self.tgt_c)
-            patch = self.g_ema(self.sample_z.unsqueeze(1).repeat(1, self.num_classes, 1).flatten(0, 1), self.patch_c)
+            target = self.g_ema(self.sample_z, self.tgt_c)['target']
+            patch = self.g_ema(self.sample_z.unsqueeze(1).repeat(1, self.num_classes, 1).flatten(0, 1), self.patch_c)['patch']
 
         target = self.all_gather(target)
         patch = self.all_gather(patch)
@@ -503,7 +503,7 @@ class Trainer():
             save_image(
                 target,
                 self.outdir / 'samples' / f'fake-{i :06d}.png',
-                nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
+                nrow=int(self.cfg.n_sample ** 0.5),
                 normalize=True,
                 value_range=(-1, 1),
             )
