@@ -498,7 +498,7 @@ class Trainer():
             assert patch.shape[0] == self.cfg.n_sample * self.num_classes
 
         _, c, h, w = patch.shape
-        patch = patch.reshape(self.cfg.n_sample, self.num_classes, c, h, w)
+        # patch = patch.reshape(self.cfg.n_sample, self.num_classes, c, h, w)
         if self.local_rank == 0:
             save_image(
                 target,
@@ -510,7 +510,7 @@ class Trainer():
             save_image(
                 patch,
                 self.outdir / 'samples' / f'fake-{i :06d}-patch.png',
-                nrow=int(self.cfg.n_sample ** 0.5) * len(self.num_classes),
+                nrow=int(self.cfg.n_sample ** 0.5) * self.num_classes,
                 normalize=True,
                 value_range=(-1, 1),
             )
