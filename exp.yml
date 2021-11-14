@@ -24,7 +24,7 @@ DATASET:
     - '~/data/deepfashion'
   sources:
     - 'fixedface_unalign1.0_0.125'
-  xflip: true
+  xflip: false
   num_workers: 4
   pin_memory: true
 
@@ -55,7 +55,7 @@ MODEL:
 
 TRAIN:
   iteration: 300000
-  batch_gpu: 8
+  batch_gpu: 4
   lrate: 0.002
   lrate_atten: 0.002
   R1:
@@ -67,7 +67,7 @@ TRAIN:
     bs_shrink: 2
   style_mixing_prob: 0.0
   CKPT:
-    path: 'results/00066-7w60vk4b-4gpu-cond-br/checkpoints/ckpt-006250.pt'
+    path: ''
     every: 6250
     max_keep: -1
   SAMPLE:
@@ -80,5 +80,5 @@ EVAL:
     every: 6250
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: 'results/00066-7w60vk4b-4gpu-cond-br/inception_cache.pkl'
+    inception_cache: 'results/inception_cache.pkl'
 
