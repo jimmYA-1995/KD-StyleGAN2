@@ -1,5 +1,5 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'cond-br'
+name: 'cond-br-slide'
 description: >
     conditonal branch Discriminator. target(1/8), and discrete class for manually defined patch. with reconstruction loss
 n_sample: 64
@@ -23,8 +23,9 @@ DATASET:
   roots:
     - '~/data/deepfashion'
   sources:
+    - 'unalign_1.0'
     - 'fixedface_unalign1.0_0.125'
-  xflip: false
+  xflip: true
   num_workers: 4
   pin_memory: true
 
@@ -55,7 +56,7 @@ MODEL:
 
 TRAIN:
   iteration: 300000
-  batch_gpu: 4
+  batch_gpu: 8
   lrate: 0.002
   lrate_atten: 0.002
   R1:

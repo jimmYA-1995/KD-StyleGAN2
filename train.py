@@ -404,7 +404,9 @@ class Trainer():
             # recontruction loss: patch guide
             loss = 0
             for r, t, l in zip(fake_imgs['patch'].detach(), fake_imgs['target'], label):
-                loss = loss + torch.abs(r - t[(slice(None), *self.train_ds.plocation[l - 1])]).mean()
+                x1, y1, x2, y2 = self.train_ds.plocation[l - 1]
+                loss = loss + torch.abs(
+                    torch.nn.functional.interpolate(r.unsqueeze(0), size=(y2 - y1, x2 - x1), mode='bicubic') - t[:, y1:y2, x1:x2]).mean()
             rec_patch_target = loss / label.shape[0]
             loss_Gmain = loss_Gmain + rec_patch_target
             self.stats[f'loss/G-patch->target'] = rec_patch_target.detach()

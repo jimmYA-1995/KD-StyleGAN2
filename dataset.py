@@ -372,7 +372,7 @@ class DeepFashion_Patch(data.Dataset):
     @configurable()
     def __init__(
         self,
-        resolution: int = 256,
+        resolution: List[int] = [256],
         roots: List[str] = None,
         sources: List[str] = None,
         split: str = 'all',
@@ -381,19 +381,15 @@ class DeepFashion_Patch(data.Dataset):
     ):
         assert roots is not None and sources is not None
         assert len(roots) == 1, "Only support 1 data root directory. List is just for compatibility"
-        assert len(sources) == 1, "assume 1 source for human"
+        assert len(sources) == 2, "assume source1 for face, source 2 for human"
 
-        self.res = resolution
+        self.res, self.patch_res = resolution
         self.xflip = xflip
-        self.num_classes = 5  # exclude target class
+        self.num_classes = 7  # exclude target class
 
-        s = resolution // 2
+        s = int(self.res // 8)
         self.plocation = [
-            (slice(None, s), slice((resolution - s) // 2, (resolution + s) // 2)),
-            (slice((resolution - s) // 2, (resolution + s) // 2), slice((resolution - s) // 2, (resolution + s) // 2)),
-            (slice(s, None), slice((resolution - s) // 2, (resolution + s) // 2)),
-            (slice(None, s), slice(None, s)),
-            (slice(None, s), slice(s, None))
+            ((self.res - s) // 2, int(s * i * 0.5), (self.res + s) // 2, int(s * (i * 0.5 + 1))) for i in range(1, 8)
         ]
 
         root = Path(roots[0]).expanduser()
@@ -401,7 +397,8 @@ class DeepFashion_Patch(data.Dataset):
         self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
         self.fileIDs.sort()
 
-        self.target_dir = root / f'r{self.res}' / sources[0]
+        self.target_dir = root / f'r{self.res}' / sources[1]
+        self.patch_dir = root / sources[0]
         assert self.target_dir and set(self.fileIDs) <= set(p.stem for p in self.target_dir.glob('*.png'))
 
         total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
@@ -410,7 +407,7 @@ class DeepFashion_Patch(data.Dataset):
     @classmethod
     def from_config(cls, cfg):
         return {
-            'resolution': cfg.resolutions[0],
+            'resolution': cfg.resolutions,
             'roots': cfg.DATASET.roots,
             'sources': cfg.DATASET.sources,
             'xflip': cfg.DATASET.xflip
@@ -447,6 +444,7 @@ class DeepFashion_Patch(data.Dataset):
         img = io.imread(self.target_dir / f'{fileID}.png')
         data['target'] = self.transform(img, xflip=xflip)
         label = np.random.randint(self.num_classes) + 1  # offset by target class
-        data['patch'] = self.transform(img[self.plocation[label - 1]], xflip=xflip)
+        patch_img = cv2.resize(io.imread(self.patch_dir / f'slide_{label - 1}/{fileID}.png'), (self.patch_res, self.patch_res), interpolation=cv2.INTER_LANCZOS4)
+        data['patch'] = self.transform(patch_img, xflip=xflip)
 
         return data, label
