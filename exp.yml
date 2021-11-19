@@ -1,15 +1,15 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-FFHQ'
+name: 'Dbr-AFHQv2-dog512'
 description: >
-    Reconsturction loss on face
-n_sample: 64
-resolution: 256
+    Reconsturction loss on central crop of target
+n_sample: 32
+resolution: 512
 classes:
 - 'ref'
 - 'target'
 
 ADA:
-  enabled: false
+  enabled: true
   target: 0.6  # set 0 to fix prob.
   p: 0.0
   interval: 4
@@ -17,11 +17,10 @@ ADA:
   # KWARGS:
 
 DATASET:
-  name: FFHQ256
-  root: '~/data/FFHQ'
+  name: AFHQv2
+  root: '~/data/afhq_v2'
   sources:
-    - 'images256x256'            # directory of face image
-    - 'images256x256-cropface'   # subdirectory of human image
+    - 'dog'            # directory of face image
   xflip: true
   num_workers: 4
   pin_memory: true
@@ -42,7 +41,7 @@ MODEL:
   SYNTHESIS:
     img_channels: 3
     bottom_res: 4
-    channel_base: 16384
+    channel_base: 32768
 
   ATTENTION:
     resolutions: []
@@ -53,7 +52,7 @@ MODEL:
     c_dim: 0
     branch_res: 32
     top_res: 4
-    channel_base: 16384
+    channel_base: 32768
 
 
 TRAIN:
@@ -63,7 +62,7 @@ TRAIN:
   lrate_atten: 0.002
   R1:
     every: 16
-    gamma: 1
+    gamma: 0.5
   PPL:
     every: 8
     gain: 2

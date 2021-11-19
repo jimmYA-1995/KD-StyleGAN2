@@ -446,7 +446,7 @@ class Trainer():
                     loss_Gmain = loss_Gmain + rec_loss
 
             rec_targets = torch.nn.functional.interpolate(fake_imgs['ref'].detach(), scale_factor=0.5, mode='bicubic')
-            loss_rec = torch.nn.functional.l1_loss(rec_targets, fake_imgs['target'][:, :, 96:224, 64:192])
+            loss_rec = torch.nn.functional.l1_loss(rec_targets, fake_imgs['target'][:, :, 128:384, 128:384])
             self.stats['loss/G-reconstruction'] = loss_rec.detach()
             loss_Gmain = loss_Gmain + loss_rec
         # self.g.zero_grad(set_to_none=True)
