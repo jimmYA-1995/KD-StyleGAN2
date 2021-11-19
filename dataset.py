@@ -3,7 +3,7 @@ import json
 import pickle
 from collections import namedtuple
 from pathlib import Path
-from typing import List, Set
+from typing import List, Dict
 
 import numpy as np
 import torch
@@ -164,15 +164,14 @@ class DeepFashion(BaseDataset):
                              f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
         self.targets = targets
 
-    def __getitem__(self, idx) -> List[torch.Tensor]:
+    def __getitem__(self, idx) -> Dict[torch.Tensor]:
         data = {}
 
         try:
             xflip = self.xflip and idx >= len(self.fileIDs)
             fileID = self.fileIDs[idx % len(self.fileIDs)]
         except IndexError as e:
-            print(self.xflip, idx)
-            raise RuntimeError(e)
+            raise RuntimeError("Invalid dataset index: {idx} (xflip={xflip})") from e
 
         if 'face' in self.targets:
             img = io.imread(self.face_dir / f'{fileID}.png')
@@ -239,6 +238,51 @@ class DeepFashion(BaseDataset):
                 face_lm[:, 0] = 1. - face_lm[:, 0]
 
             data['face_lm'] = torch.from_numpy(face_lm.copy())
+
+        return data
+
+
+@register
+class FFHQ256(BaseDataset):
+    @configurable
+    def __init__(
+        self,
+        root: str,
+        resolution: int = 256,
+        sources: List[str] = None,
+        xflip: bool = False,
+        split: str = None,
+        num_items: int = None
+    ):
+        super().__init__(root, resolution=resolution, sources=sources, xflip=xflip, split=split)
+        assert split is None
+        self.ref_dir = self.root / self.src[0]
+        self.target_dir = self.root / self.src[1]
+        self.fileIDs = sorted(p.relative_to(self.ref_dir) for p in self.ref_dir.glob('**/*.png'))
+        assert set(self.fileIDs) <= set([p.relative_to(self.target_dir) for p in self.target_dir.glob('**/*.png')])
+
+        self.num_items = len(self.fileIDs)
+        if num_items is not None:
+            assert num_items > 0
+            if num_items > len(self.fileIDs):
+                print(f"required #items is bigger than all dataset. Using whole dataset({len(self.fileIDs)} items)")
+
+            self.num_items = min(len(self.fileIDs), num_items)
+
+        if self.xflip:
+            self.num_items *= 2
+
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        assert idx < len(self), f"{idx} v.s {len(self)}"
+        try:
+            xflip = self.xflip and idx > len(self.fileIDs)
+            fileID = self.fileIDs[idx % len(self.fileIDs)]
+        except IndexError as e:
+            raise RuntimeError("Invalid dataset index: {idx} (xflip={xflip})") from e
+
+        data = {}
+        data['ref'] = self.transform(io.imread(self.ref_dir / fileID), xflip=xflip)
+        data['target'] = self.transform(io.imread(self.target_dir / fileID), xflip=xflip)
 
         return data
 
