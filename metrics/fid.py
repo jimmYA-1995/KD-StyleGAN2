@@ -90,14 +90,8 @@ class FIDTracker():
             for c in self.classes:
                 self.log.info(f"Extract real features from '{c}'")
                 t = time.time()
-                if c == 'face':
-                    real_means[c], real_covs[c] = self.extract_features(generator(ds, c))
-                elif c == 'human':
-                    mean_dict, cov_dict = self.extract_feature_dict(generator(ds, c))
-                    real_means.update(mean_dict)
-                    real_covs.update(cov_dict)
-                else:
-                    raise ValueError("Unknown class for dataset")
+                real_means[c], real_covs[c] = self.extract_features(generator(ds, c))
+
                 self.log.info(f"cost {time.time() - t :.2f} sec")
 
             if self.rank == 0:
@@ -140,15 +134,8 @@ class FIDTracker():
 
         for c in classes:
             self.log.info(f"Extract feature from {c} on {iteration} iteration")
-            if c == 'face':
-                sample_mean, sample_cov = self.extract_features(generator_fn(c))
-                fid[c] = FIDTracker.calc_fid(self.real_means[c], self.real_covs[c], sample_mean, sample_cov, eps=eps)
-            elif c == 'human':
-                sample_mean, sample_cov = self.extract_feature_dict(generator_fn(c))
-                for k in sample_mean.keys():
-                    fid[k] = FIDTracker.calc_fid(self.real_means[k], self.real_covs[k], sample_mean[k], sample_cov[k], eps=eps)
-            else:
-                raise ValueError("Unknown class")
+            sample_mean, sample_cov = self.extract_features(generator_fn(c))
+            fid[c] = FIDTracker.calc_fid(self.real_means[c], self.real_covs[c], sample_mean, sample_cov, eps=eps)
 
         self.fids.append(fid)
         total_time = time.time() - start

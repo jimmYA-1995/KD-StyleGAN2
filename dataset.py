@@ -35,7 +35,6 @@ def get_dataset(cfg, **override_kwargs):
 def get_sampler(ds, eval=False, num_gpus=1):
     """ Using state to decide common dataloader kwargs. """
     # TODO workers kwargs
-    assert ds.targets, "Please call ds.update_targets([desired_targets])"
     if num_gpus > 1:
         sampler = torch.utils.data.DistributedSampler(
             ds, shuffle=(not eval), drop_last=(not eval))
@@ -164,7 +163,7 @@ class DeepFashion(BaseDataset):
                              f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
         self.targets = targets
 
-    def __getitem__(self, idx) -> Dict[torch.Tensor]:
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
         data = {}
 
         try:
@@ -275,11 +274,13 @@ class FFHQ256(BaseDataset):
         num_items: int = None
     ):
         super().__init__(root, resolution=resolution, sources=sources, xflip=xflip, split=split)
-        assert split is None
+        if split is not None:
+            print("Ignore split args in FFHQ dataset")
         self.ref_dir = self.root / self.src[0]
         self.target_dir = self.root / self.src[1]
         self.fileIDs = sorted(p.relative_to(self.ref_dir) for p in self.ref_dir.glob('**/*.png'))
         assert set(self.fileIDs) <= set([p.relative_to(self.target_dir) for p in self.target_dir.glob('**/*.png')])
+        self.targets = self.available_targets = ['ref', 'target']
 
         self.num_items = len(self.fileIDs)
         if num_items is not None:
@@ -292,6 +293,12 @@ class FFHQ256(BaseDataset):
         if self.xflip:
             self.num_items *= 2
 
+    def update_targets(self, targets: List[str]) -> None:
+        if not all([t in self.available_targets for t in targets]):
+            raise ValueError(f"Some of desire targets is not available. "
+                             f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
+        self.targets = targets
+
     def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
         assert idx < len(self), f"{idx} v.s {len(self)}"
         try:
@@ -301,8 +308,10 @@ class FFHQ256(BaseDataset):
             raise RuntimeError("Invalid dataset index: {idx} (xflip={xflip})") from e
 
         data = {}
-        data['ref'] = self.transform(io.imread(self.ref_dir / fileID), xflip=xflip)
-        data['target'] = self.transform(io.imread(self.target_dir / fileID), xflip=xflip)
+        if 'ref' in self.targets:
+            data['ref'] = self.transform(io.imread(self.ref_dir / fileID), xflip=xflip)
+        if 'target' in self.targets:
+            data['target'] = self.transform(io.imread(self.target_dir / fileID), xflip=xflip)
 
         return data
 
