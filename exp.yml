@@ -1,5 +1,5 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-atten'
+name: 'Dbr-rec'
 description: >
     Default configuration for synthesis of face & human.
     fixed face position. with reconstruction loss
@@ -19,8 +19,7 @@ ADA:
 
 DATASET:
   name: DeepFashion
-  roots:
-    - '~/data/deepfashion'
+  root: '~/data/deepfashion'
   sources:
     - 'unalign_1.0'                 # directory of face image
     - 'fixedface_unalign1.0_0.125'  # subdirectory of human image
