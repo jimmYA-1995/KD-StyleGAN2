@@ -132,7 +132,7 @@ class DeepFashion(data.Dataset):
 
         self.src = sources[0]
         self.face_dir = root / self.src / 'face'
-        self.human_dir = root / f'r{self.res}' / 'images'
+        self.human_dir = root / f'r{self.res}' / sources[1]
         self.kp_dir = root / 'kp_heatmaps/keypoints'
         self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
