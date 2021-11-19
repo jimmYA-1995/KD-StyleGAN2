@@ -47,54 +47,60 @@ def get_sampler(ds, eval=False, num_gpus=1):
     return sampler
 
 
-class DefaultDataset(data.Dataset):
-    def __init__(self, cfg, split='train'):
-        assert len(cfg.roots) == len(cfg.source) == 1
-        assert split in ['train', 'val', 'test', 'all']
-        self.cfg = cfg
-        self.root = Path(cfg.roots[0]).expanduser()
-        self.face_dir = None
-        self.fileIDs = None
-        self.idx = None
-        self.resolution = cfg.resolution
-        self.split = split
-        self.xflip = cfg.xflip
-        self._img_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(cfg.mean, cfg.std, inplace=True),
-        ])
-        self._mask_transform = transforms.ToTensor()
+class BaseDataset(data.Dataset):
+    @configurable()
+    def __init__(
+        self,
+        root: str,
+        resolution: int = 256,
+        sources: List[str] = None,
+        xflip: bool = False,
+        split: str = None,
+        num_items: int = None       # Manually setting dataset size (before x-flip)
+    ):
+        root = Path(root).expanduser()
+        assert root.exists(), f"Data root does not exists: {root}"
+        if split is not None:
+            assert split in ['all', 'train', 'val', 'test']
 
-    def __len__(self):
-        return len(self.fileIDs) * 2 if self.xflip else len(self.fileIDs)
+        self.root = root
+        self.res = resolution
+        self.src = sources
+        self.xflip = xflip
+        self.num_items = num_items
 
-    def maybe_xflip(self, img):
-        """ xflip if xflip enabled and index > len(ds) / 2,
-            no op. otherwise
-        """
-        assert isinstance(img, Image.Image) and self.idx is not None
-        if not self.xflip or self.idx < len(self.fileIDs):
-            return img
-
-        return img.transpose(method=Image.FLIP_LEFT_RIGHT)
-
-    def img_transform(self, img):
-        img = self.maybe_xflip(img)
-        return self._img_transform(img)
-
-    def mask_transform(self, img):
-        img = self.maybe_xflip(img)
-        return self._mask_transform(img)
+    @classmethod
+    def from_config(cls, cfg):
+        return {
+            'root': cfg.DATASET.root,
+            'resolution': cfg.resolution,
+            'sources': cfg.DATASET.sources,
+            'xflip': cfg.DATASET.xflip
+        }
 
     @classmethod
     def worker_init_fn(cls, worker_id):
         """ For reproducibility & randomness in multi-worker mode """
         worker_seed = torch.initial_seed() % 2**32
         np.random.seed(worker_seed)
-        worker_info = torch.utils.data.get_worker_info()
-        dataset = worker_info.dataset
-        if hasattr(dataset, 'rng'):
-            dataset.rng = np.random.default_rng(worker_seed)
+        # worker_info = torch.utils.data.get_worker_info()
+
+    def __len__(self):
+        return self.num_items
+
+    def transform(self, img: np.ndarray, xflip: bool, channel_first=True) -> torch.Tensor:
+        """ normalize, xflip, transform, to Tensor """
+        img = (img.astype(np.float32) - 127.5) / 127.5
+        if xflip:
+            img = img[:, ::-1, :]
+
+        if channel_first:
+            img = img.transpose(2, 0, 1)
+
+        return torch.from_numpy(img.copy())
+
+    def __getitem__(self, idx):
+        raise NotImplementedError
 
 
 @register
@@ -106,14 +112,14 @@ class DeepFashion(data.Dataset):
     def __init__(
         self,
         resolution: int = 256,
-        roots: List[str] = None,
+        root: List[str] = None,
         sources: List[str] = None,
         split: str = 'all',
         xflip: bool = False,
         num_items: int = float('inf'),
         resampling: bool = False,  # Whether to resample face position when create masked face
     ):
-        assert roots is not None and sources is not None
+        assert root is not None and sources is not None
         self.classes = ["DF_face", "DF_human"]
         self.res = resolution
         self.xflip = xflip
@@ -125,7 +131,7 @@ class DeepFashion(data.Dataset):
         self.mask_size = (face_size, face_size)
         self.targets = []
 
-        root = Path(roots[0]).expanduser()
+        root = Path(root).expanduser()
         split_map = pickle.load(open(root / 'split.pkl', 'rb'))
         self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
         self.fileIDs.sort()
@@ -152,7 +158,7 @@ class DeepFashion(data.Dataset):
     def from_config(cls, cfg):
         return {
             'resolution': cfg.resolution,
-            'roots': cfg.DATASET.roots,
+            'root': cfg.DATASET.root,
             'sources': cfg.DATASET.sources,
             'xflip': cfg.DATASET.xflip
         }
