@@ -16,7 +16,7 @@ _C.classes = []
 # ------ dataset ------
 _C.DATASET = CN()
 _C.DATASET.name = 'DeepFashion'
-_C.DATASET.roots = ['~/data/deepfashion']
+_C.DATASET.root = ''
 _C.DATASET.sources = ['align_1.2']
 _C.DATASET.xflip = False
 # kwargs of data loader

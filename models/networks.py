@@ -172,16 +172,16 @@ class Generator(nn.Module):
         synthesis_args = (w_dim, img_resolution)
 
         if mode == 'joint':
-            synthesis1 = SynthesisNetwork(*synthesis_args, pose=True, const=True, **synthesis_kwargs)
-            self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
+            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
+            # self.heatmap_shape = synthesis1.pose_encoder.heatmap_shape
             mapping1 = MappingNetwork(z_dim=z_dim, c_dim=2, w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping1]])
             self.synthesis = nn.ModuleDict([[classes[0], synthesis1], [classes[1], synthesis1]])
         else:
             # 1: teacher Network, 2: student Network
             synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
-            synthesis2 = SynthesisNetwork(*synthesis_args, pose=True, **synthesis_kwargs)
-            self.heatmap_shape = synthesis2.pose_encoder.heatmap_shape
+            synthesis2 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
+            # self.heatmap_shape = synthesis2.pose_encoder.heatmap_shape
             mapping1 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
             mapping2 = MappingNetwork(z_dim=z_dim, c_dim=0, w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[0], mapping1], [classes[1], mapping2]])

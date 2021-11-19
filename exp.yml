@@ -1,8 +1,8 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'FaceHuman-KD-attention'
+name: 'Dbr-rec'
 description: >
     Default configuration for synthesis of face & human.
-    Apply maxpooling to face features(query), Separate Attention Network from Generator
+    fixed face position. with reconstruction loss
 n_sample: 64
 resolution: 256
 classes:
@@ -19,11 +19,10 @@ ADA:
 
 DATASET:
   name: DeepFashion
-  roots:
-    - '~/data/deepfashion'
+  root: '~/data/deepfashion'
   sources:
-    - 'align_1.2'  # directory of face image
-    - 'images'     # subdirectory of human image
+    - 'unalign_1.0'                 # directory of face image
+    - 'fixedface_unalign1.0_0.125'  # subdirectory of human image
   xflip: true
   num_workers: 0
   pin_memory: true
@@ -45,14 +44,9 @@ MODEL:
     img_channels: 3
     bottom_res: 4
     channel_base: 16384
-    pose_encoder_kwargs:
-      name: HeatmapEncoder
-      max_channels: 512
-      heatmap_size: 256
-      in_channels: 17
 
   ATTENTION:
-    resolutions: [4, 8, 16, 32, 64, 128, 256]
+    resolutions: []
     feature_types: 'relu'
 
   DISCRIMINATOR:
@@ -90,5 +84,5 @@ EVAL:
     every: 5
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: '/tmp/inception_cache.pkl'
+    inception_cache: ''
 
