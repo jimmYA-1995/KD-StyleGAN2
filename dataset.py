@@ -48,7 +48,6 @@ def get_sampler(ds, eval=False, num_gpus=1):
 
 
 class BaseDataset(data.Dataset):
-    @configurable()
     def __init__(
         self,
         root: str,
@@ -56,7 +55,6 @@ class BaseDataset(data.Dataset):
         sources: List[str] = None,
         xflip: bool = False,
         split: str = None,
-        num_items: int = None       # Manually setting dataset size (before x-flip)
     ):
         root = Path(root).expanduser()
         assert root.exists(), f"Data root does not exists: {root}"
@@ -67,13 +65,13 @@ class BaseDataset(data.Dataset):
         self.res = resolution
         self.src = sources
         self.xflip = xflip
-        self.num_items = num_items
+        self.num_items = None  # must be defined in inherited class
 
     @classmethod
     def from_config(cls, cfg):
         return {
-            'root': cfg.DATASET.root,
             'resolution': cfg.resolution,
+            'root': cfg.DATASET.root,
             'sources': cfg.DATASET.sources,
             'xflip': cfg.DATASET.xflip
         }
@@ -88,9 +86,18 @@ class BaseDataset(data.Dataset):
     def __len__(self):
         return self.num_items
 
-    def transform(self, img: np.ndarray, xflip: bool, channel_first=True) -> torch.Tensor:
+    def transform(
+        self,
+        img: np.ndarray,
+        normalize: bool = True,      # Whether to normalize image from [0,255] to [-1, 1]
+        channel_first: bool = True,  # transpose color channel to first channel (for pytorch tensor)
+        xflip: bool = False,         # horizontal flip
+    ) -> torch.Tensor:
         """ normalize, xflip, transform, to Tensor """
-        img = (img.astype(np.float32) - 127.5) / 127.5
+        img = img.astype(np.float32)
+        if normalize:
+            img = (img - 127.5) / 127.5
+
         if xflip:
             img = img[:, ::-1, :]
 
@@ -104,25 +111,24 @@ class BaseDataset(data.Dataset):
 
 
 @register
-class DeepFashion(data.Dataset):
+class DeepFashion(BaseDataset):
     FacePosition = namedtuple('FacePosition', 'X_mean X_std cx_mean cx_std cy_mean cy_std')
     FacePosition.__qualname__ = "DeepFashion.FacePosition"
 
     @configurable()
     def __init__(
         self,
+        root: str,
         resolution: int = 256,
-        root: List[str] = None,
         sources: List[str] = None,
-        split: str = 'all',
         xflip: bool = False,
+        split: str = 'all',
         num_items: int = float('inf'),
         resampling: bool = False,  # Whether to resample face position when create masked face
     ):
-        assert root is not None and sources is not None
+        super().__init__(root, resolution, sources, xflip, split)
+        assert len(self.src) == 2, "Assume source1 for Face & source2 for target(human)"
         self.classes = ["DF_face", "DF_human"]
-        self.res = resolution
-        self.xflip = xflip
         # all targets: ['face', 'human', 'heatmap', 'masked_face', 'vis_kp', 'lm', 'face_lm', 'quad_mask']
         self.available_targets = ['face', 'human', 'face_lm']
         face_ratio = float(sources[1].split('_')[-1])
@@ -131,8 +137,7 @@ class DeepFashion(data.Dataset):
         self.mask_size = (face_size, face_size)
         self.targets = []
 
-        root = Path(root).expanduser()
-        split_map = pickle.load(open(root / 'split.pkl', 'rb'))
+        split_map = pickle.load(open(self.root / 'split.pkl', 'rb'))
         self.fileIDs = [ID for IDs in split_map.values() for ID in IDs] if split == 'all' else split_map[split]
         self.fileIDs.sort()
 
@@ -141,11 +146,10 @@ class DeepFashion(data.Dataset):
         self.small = DeepFashion.FacePosition(44.56, 3.32, 517.075, 26.655, 100.36, 17.22)
         self.rng = np.random.default_rng()
 
-        self.src = sources[0]
-        self.face_dir = root / self.src / 'face'
-        self.human_dir = root / f'r{self.res}' / sources[1]
-        self.kp_dir = root / 'kp_heatmaps/keypoints'
-        self.dlib_ann = json.load(open(root / 'df_landmarks.json', 'r'))
+        self.face_dir = self.root / self.src[0] / 'face'
+        self.human_dir = self.root / f'r{self.res}' / sources[1]
+        self.kp_dir = self.root / 'kp_heatmaps/keypoints'
+        self.dlib_ann = json.load(open(self.root / 'df_landmarks.json', 'r'))
         assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
@@ -154,57 +158,29 @@ class DeepFashion(data.Dataset):
         total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
         self.num_items = min(total, num_items)
 
-    @classmethod
-    def from_config(cls, cfg):
-        return {
-            'resolution': cfg.resolution,
-            'root': cfg.DATASET.root,
-            'sources': cfg.DATASET.sources,
-            'xflip': cfg.DATASET.xflip
-        }
-
-    @classmethod
-    def worker_init_fn(cls, worker_id):
-        """ For reproducibility & randomness in multi-worker mode """
-        worker_seed = torch.initial_seed() % 2**32
-        np.random.seed(worker_seed)
-        # worker_info = torch.utils.data.get_worker_info()
-
-    def __len__(self):
-        return self.num_items
-
     def update_targets(self, targets: List[str]) -> None:
         if not all([t in self.available_targets for t in targets]):
             raise ValueError(f"Some of desire targets is not available. "
                              f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
         self.targets = targets
 
-    def transform(self, img: np.ndarray, normalize=True, channel_first=True) -> torch.Tensor:
-        """ normalize, channel first, maybe xflip, to Tensor """
-        img = (img.astype(np.float32) - 127.5) / 127.5
-        if self.xflip and self.idx > len(self.fileIDs):
-            img = img[:, ::-1, :]
-        if channel_first:
-            img = img.transpose(2, 0, 1)
-
-        return torch.from_numpy(img.copy())
-
     def __getitem__(self, idx) -> List[torch.Tensor]:
         data = {}
-        self.idx = idx
+
         try:
-            fileID = self.fileIDs[idx % len(self.fileIDs)] if self.xflip else self.fileIDs[idx]
+            xflip = self.xflip and idx >= len(self.fileIDs)
+            fileID = self.fileIDs[idx % len(self.fileIDs)]
         except IndexError as e:
             print(self.xflip, idx)
             raise RuntimeError(e)
 
         if 'face' in self.targets:
             img = io.imread(self.face_dir / f'{fileID}.png')
-            data['face'] = self.transform(img)
+            data['face'] = self.transform(img, xflip=xflip)
 
         if 'human' in self.targets:
             img = io.imread(self.human_dir / f'{fileID}.png')
-            data['human'] = self.transform(img)
+            data['human'] = self.transform(img, xflip=xflip)
 
         if 'masked_face' in self.targets:
             assert 'face' in data, "require face targets to make masked_face"
@@ -232,15 +208,15 @@ class DeepFashion(data.Dataset):
 
         if 'heatmap' in self.targets:
             heatmap = cords_to_map(cords, (self.res, self.res), sigma=8)
-            data['heatmap'] = self.transform(heatmap, normalize=False)
+            data['heatmap'] = self.transform(heatmap, normalize=False, xflip=xflip)
 
         if 'vis_kp' in self.targets:
             vis_kp, _ = draw_pose_from_cords(cords.astype(int), (self.res, self.res))
-            data['vis_kp'] = self.transform(vis_kp)
+            data['vis_kp'] = self.transform(vis_kp, xflip=xflip)
 
         if any(x in self.targets for x in ['lm', 'quad_mask']):
             landmarks = np.array(self.dlib_ann[fileID]['face_landmarks'])
-            if self.xflip and self.idx > len(self.fileIDs):
+            if xflip:
                 landmarks[:, 0] = 1. - landmarks[:, 0]
 
             if 'lm' in self.targets:
@@ -248,7 +224,7 @@ class DeepFashion(data.Dataset):
 
             landmarks = (landmarks * self.res).astype(int)
             if 'quad_mask' in self.targets:
-                quad_mask = ffhq_alignment(landmarks, output_size=self.res, ratio=float(self.src.split('_')[-1]))
+                quad_mask = ffhq_alignment(landmarks, output_size=self.res, ratio=float(self.src[0].split('_')[-1]))
                 data['quad_mask'] = torch.from_numpy(quad_mask.copy())[None, ...]  # (c, h, w)
 
         if 'face_lm' in self.targets:
@@ -259,7 +235,7 @@ class DeepFashion(data.Dataset):
             mouth_avg = (face_lm[48:49] + face_lm[54:55]) * 0.5
             profile = face_lm[(0, 3, 6, 8, 10, 13, 16), :]
             face_lm = np.concatenate([eye_left, eye_right, nose, mouth_avg, profile], axis=0)
-            if self.xflip and self.idx > len(self.fileIDs):
+            if xflip:
                 face_lm[:, 0] = 1. - face_lm[:, 0]
 
             data['face_lm'] = torch.from_numpy(face_lm.copy())
@@ -268,14 +244,36 @@ class DeepFashion(data.Dataset):
 
 
 if __name__ == "__main__":
+    # Test Code
+    import torch
+    import numpy as np
+    from PIL import Image
     from config import get_cfg_defaults
+
+    def display(t):
+        if t.is_cuda:
+            t = t.cpu()
+        t = np.clip(t.numpy() * 127.5 + 128, 0, 255).astype(np.uint8)
+        if t.ndim == 4:
+            b, c, h, w = t.shape
+            t = t.transpose(2, 0, 3, 1).reshape(h, b * w, c)
+        elif t.ndim == 3:
+            t = t.transpose(1, 2, 0)
+        else:
+            raise RuntimeError(f"Unknown shape: {t.shape}")
+        Image.fromarray(t).show()
+
     cfg = get_cfg_defaults()
+    cfg.merge_from_file('exp.yml')
     ds = get_dataset(cfg, split='train', xflip=False)
+
+    print(cfg)
     print(len(ds))
-    ds.update_targets(["face", "human", "heatmap"])
+    # print(ds.available_targets)
+    # ds.update_targets(ds.available_targets)
     loader = torch.utils.data.DataLoader(
         ds,
         batch_size=2
     )
-    data = next(iter(loader))
-    print("finish")
+    batch = next(iter(loader))
+    print("Test Done")
