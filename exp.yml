@@ -1,15 +1,15 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-AFHQv2-dog512'
+name: 'Dbr-FFHQ'
 description: >
-    Reconsturction loss on central crop of target
-n_sample: 32
-resolution: 512
+    Reconsturction loss on face
+n_sample: 64
+resolution: 256
 classes:
 - 'ref'
 - 'target'
 
 ADA:
-  enabled: true
+  enabled: false
   target: 0.6  # set 0 to fix prob.
   p: 0.0
   interval: 4
@@ -17,10 +17,11 @@ ADA:
   # KWARGS:
 
 DATASET:
-  name: AFHQv2
-  root: '~/data/afhq_v2'
+  name: FFHQ256
+  root: '~/data/FFHQ'
   sources:
-    - 'dog'            # directory of face image
+    - 'images256x256-cropface'   # subdirectory of human image
+    - 'images256x256'            # directory of face image
   xflip: true
   num_workers: 4
   pin_memory: true
@@ -41,7 +42,7 @@ MODEL:
   SYNTHESIS:
     img_channels: 3
     bottom_res: 4
-    channel_base: 32768
+    channel_base: 16384
 
   ATTENTION:
     resolutions: []
@@ -52,24 +53,24 @@ MODEL:
     c_dim: 0
     branch_res: 32
     top_res: 4
-    channel_base: 32768
+    channel_base: 16384
 
 
 TRAIN:
-  iteration: 300000
+  iteration: 600000
   batch_gpu: 8
   lrate: 0.0025
   lrate_atten: 0.002
   R1:
     every: 16
-    gamma: 0.5
+    gamma: 1
   PPL:
     every: 8
     gain: 2
     bs_shrink: 2
   style_mixing_prob: 0.0
   CKPT:
-    path: ''
+    path: 'results/00070-3o1oeduv-8gpu-Dbr-FFHQ/checkpoints/ckpt-300000.pt'
     every: 6250
     max_keep: -1
   SAMPLE:
@@ -82,5 +83,5 @@ EVAL:
     every: 6250
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: ''
+    inception_cache: 'results/00070-3o1oeduv-8gpu-Dbr-FFHQ/inception_cache.pkl'
 

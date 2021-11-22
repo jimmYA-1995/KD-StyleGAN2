@@ -5,7 +5,6 @@ from collections import namedtuple
 from pathlib import Path
 from typing import List, Dict
 
-import cv2
 import numpy as np
 import torch
 import skimage.io as io
@@ -313,64 +312,6 @@ class FFHQ256(BaseDataset):
             data['ref'] = self.transform(io.imread(self.ref_dir / fileID), xflip=xflip)
         if 'target' in self.targets:
             data['target'] = self.transform(io.imread(self.target_dir / fileID), xflip=xflip)
-
-        return data
-
-
-@register
-class AFHQv2(BaseDataset):
-    @configurable
-    def __init__(
-        self,
-        root: str,
-        resolution: int = 256,
-        sources: List[str] = None,
-        xflip: bool = False,
-        split: str = None,
-        num_items: int = None
-    ):
-        super().__init__(root, resolution=resolution, sources=sources, xflip=xflip, split=split)
-        assert len(self.src) == 1, "Assume only 1 source for both ref and target"
-        if split is not None:
-            print("Ignore split args in AFHQv2 dataset")
-
-        self.target_dir = self.root / self.src[0]
-        self.fileIDs = sorted(p.relative_to(self.target_dir) for p in self.target_dir.glob('*.png'))
-        self.targets = self.available_targets = ['ref', 'target']
-
-        self.num_items = len(self.fileIDs)
-        if num_items is not None:
-            assert num_items > 0
-            if num_items > len(self.fileIDs):
-                print(f"required #items is bigger than all dataset. Using whole dataset({len(self.fileIDs)} items)")
-
-            self.num_items = min(len(self.fileIDs), num_items)
-
-        if self.xflip:
-            self.num_items *= 2
-
-    def update_targets(self, targets: List[str]) -> None:
-        if not all([t in self.available_targets for t in targets]):
-            raise ValueError(f"Some of desire targets is not available. "
-                             f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
-        self.targets = targets
-
-    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
-        assert idx < len(self), f"{idx} v.s {len(self)}"
-        try:
-            xflip = self.xflip and idx > len(self.fileIDs)
-            fileID = self.fileIDs[idx % len(self.fileIDs)]
-        except IndexError as e:
-            raise RuntimeError("Invalid dataset index: {idx} (xflip={xflip})") from e
-
-        data = {}
-        img = io.imread(self.target_dir / fileID)
-        if 'ref' in self.targets:
-            ref = img[128:384, 128:384].copy()
-            ref = cv2.resize(ref, (self.res, self.res), interpolation=cv2.INTER_LANCZOS4)
-            data['ref'] = self.transform(ref, xflip=xflip)
-        if 'target' in self.targets:
-            data['target'] = self.transform(img, xflip=xflip)
 
         return data
 
