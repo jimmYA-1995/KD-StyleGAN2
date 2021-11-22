@@ -169,6 +169,7 @@ class FIDTracker():
                 imgs = (imgs * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             except StopIteration:
                 self.log.warn(f"Only get {cnt} images")
+                break
 
             feature = self.inceptionV3(imgs, return_features=True)
             if self.num_gpus > 1:
