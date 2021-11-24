@@ -373,6 +373,9 @@ class Trainer():
         z = torch.randn(data['ref'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
             fake_imgs, _ = self.g(z, None)
+            small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
+            fake_imgs['mix'] = fake_imgs['target'].clone()
+            fake_imgs['mix'][:, :, 96:224, 64:192] = small_ref
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
 
@@ -382,16 +385,21 @@ class Trainer():
                 c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
 
             fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
+            fake_mix = torch.cat([aug_fake_imgs[k] for k in ['ref', 'mix']], dim=cat_dim)
             real_pred = self.d(real, c=c)
             fake_pred = self.d(fake, c=c)
+            fake_pred_mix = self.d(fake_mix, c=c)
             real_loss = torch.nn.functional.softplus(-real_pred).mean()
             fake_loss = torch.nn.functional.softplus(fake_pred).mean()
+            fake_mix_loss = torch.nn.functional.softplus(fake_pred_mix).mean()
             self.stats[f"D-Real-Score"] = real_pred.mean().detach()
             self.stats[f"D-Fake-Score"] = fake_pred.mean().detach()
+            self.stats[f"D-FakeMix-Score"] = fake_pred_mix.mean().detach()
             self.stats[f"loss/D-Real"] = real_loss.detach()
             self.stats[f"loss/D-Fake"] = fake_loss.detach()
+            self.stats[f"loss/D-FakeMix"] = fake_mix_loss.detach()
 
-            loss_Dmain = loss_Dmain + real_loss + fake_loss
+            loss_Dmain = loss_Dmain + real_loss + fake_loss + fake_mix_loss
 
             if self.cfg.ADA.enabled and self.cfg.ADA.target > 0:
                 self.ada_moments[0].add_(torch.ones_like(real_pred).sum())
@@ -422,6 +430,9 @@ class Trainer():
             # GAN loss
             return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
             fake_imgs, feats = self.g(z, None, return_feat_res=return_feat_res)
+            small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
+            fake_imgs['mix'] = fake_imgs['target'].clone()
+            fake_imgs['mix'][:, :, 96:224, 64:192] = small_ref
 
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
@@ -431,10 +442,14 @@ class Trainer():
                 c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
 
             fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
+            fake_mix = torch.cat([aug_fake_imgs[k] for k in ['ref', 'mix']], dim=cat_dim)
             fake_pred = self.d(fake, c=c)
+            fake_pred_mix = self.d(fake_mix, c=c)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
+            gan_mix_loss = torch.nn.functional.softplus(-fake_pred_mix).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
-            loss_Gmain = loss_Gmain + gan_loss
+            self.stats['loss/G-GANMix'] = gan_mix_loss.detach()
+            loss_Gmain = loss_Gmain + gan_loss + gan_mix_loss
 
             # attention feature reconstruction loss
             if self.atten is not None:
@@ -445,8 +460,7 @@ class Trainer():
                     self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
                     loss_Gmain = loss_Gmain + rec_loss
 
-            rec_targets = torch.nn.functional.interpolate(fake_imgs['ref'].detach(), scale_factor=0.5, mode='bicubic')
-            loss_rec = torch.nn.functional.l1_loss(rec_targets, fake_imgs['target'][:, :, 96:224, 64:192])
+            loss_rec = torch.nn.functional.l1_loss(small_ref.detach(), fake_imgs['target'][:, :, 96:224, 64:192])
             self.stats['loss/G-reconstruction'] = loss_rec.detach()
             loss_Gmain = loss_Gmain + loss_rec
         # self.g.zero_grad(set_to_none=True)
@@ -459,11 +473,11 @@ class Trainer():
             with autocast(enabled=self.autocast):
                 fake_imgs, _, ws = self.g(z[:pl_bs], None, return_dlatent=pl_reg)
                 path_loss, self.stats['mean_path_length'], self.stats['path_length'] = path_regularize(
-                    fake_imgs['ref'],
-                    ws['ref'],
+                    fake_imgs['target'],
+                    ws['target'],
                     self.stats['mean_path_length'].detach()
                 )
-            loss_Gpl = path_loss * cfg.gain * cfg.every + 0 * fake_imgs['ref'][0, 0, 0, 0]
+            loss_Gpl = path_loss * cfg.gain * cfg.every + 0 * fake_imgs['target'][0, 0, 0, 0]
             self.stats['loss/PPL'] = path_loss.detach()
 
         g_loss = loss_Gmain + loss_Gpl

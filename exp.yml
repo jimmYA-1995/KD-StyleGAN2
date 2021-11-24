@@ -1,7 +1,7 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-FFHQ'
+name: 'Dbr-FFHQ-Mix'
 description: >
-    Reconsturction loss on face
+    Reconsturction loss ref->target, replace ROI of target by resized ref, then train on GAN loss
 n_sample: 64
 resolution: 256
 classes:
@@ -14,7 +14,14 @@ ADA:
   p: 0.0
   interval: 4
   kimg: 500
-  # KWARGS:
+  KWARGS:
+    aniso: 0
+    xfrac: 0
+    brightness: 0
+    contrast: 0
+    lumaflip: 0
+    hue: 0
+    saturation: 0
 
 DATASET:
   name: FFHQ256
@@ -57,20 +64,20 @@ MODEL:
 
 
 TRAIN:
-  iteration: 600000
+  iteration: 300000
   batch_gpu: 8
   lrate: 0.0025
   lrate_atten: 0.002
   R1:
     every: 16
-    gamma: 1
+    gamma: 1.
   PPL:
     every: 8
     gain: 2
     bs_shrink: 2
   style_mixing_prob: 0.0
   CKPT:
-    path: 'results/00070-3o1oeduv-8gpu-Dbr-FFHQ/checkpoints/ckpt-300000.pt'
+    path: ''
     every: 6250
     max_keep: -1
   SAMPLE:
