@@ -75,6 +75,7 @@ _C.TRAIN.R1 = CN()
 _C.TRAIN.R1.gamma = 10.
 _C.TRAIN.R1.every = 16
 _C.TRAIN.style_mixing_prob = 0.9
+_C.TRAIN.ema = 10
 _C.TRAIN.CKPT = CN()
 _C.TRAIN.CKPT.path = ''
 _C.TRAIN.CKPT.every = 2500

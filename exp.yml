@@ -1,15 +1,15 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-FFHQ-Mix'
+name: 'Dbr-BrecaHad-Mix'
 description: >
     Reconsturction loss ref->target, replace ROI of target by resized ref, then train on GAN loss
-n_sample: 64
-resolution: 256
+n_sample: 32
+resolution: 512
 classes:
 - 'ref'
 - 'target'
 
 ADA:
-  enabled: false
+  enabled: true
   target: 0.6  # set 0 to fix prob.
   p: 0.0
   interval: 4
@@ -25,10 +25,10 @@ ADA:
 
 DATASET:
   name: FFHQ256
-  root: '~/data/FFHQ'
+  root: '~/data/BreCaHAD'
   sources:
-    - 'images256x256-cropface'   # subdirectory of human image
-    - 'images256x256'            # directory of face image
+    - 'brecahad-ref'
+    - 'brecahad-target'
   xflip: true
   num_workers: 4
   pin_memory: true
@@ -49,7 +49,7 @@ MODEL:
   SYNTHESIS:
     img_channels: 3
     bottom_res: 4
-    channel_base: 16384
+    channel_base: 32768
 
   ATTENTION:
     resolutions: []
@@ -60,7 +60,7 @@ MODEL:
     c_dim: 0
     branch_res: 32
     top_res: 4
-    channel_base: 16384
+    channel_base: 32768
 
 
 TRAIN:
@@ -70,12 +70,13 @@ TRAIN:
   lrate_atten: 0.002
   R1:
     every: 16
-    gamma: 1.
+    gamma: 0.5
   PPL:
     every: 8
     gain: 2
     bs_shrink: 2
   style_mixing_prob: 0.0
+  ema: 20
   CKPT:
     path: ''
     every: 6250
@@ -90,5 +91,5 @@ EVAL:
     every: 6250
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: 'results/00070-3o1oeduv-8gpu-Dbr-FFHQ/inception_cache.pkl'
+    inception_cache: ''
 
