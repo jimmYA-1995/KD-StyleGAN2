@@ -23,7 +23,7 @@ def image_generator(model, batch_size, target_class, ds=None, device='cuda', num
         # for batch in loader:
         #     data = {k: v.to(device) for k, v in batch.items()}
         z = torch.randn([batch_size, model.z_dim], device=device)
-        yield model.inference(z, None, target_class)
+        yield model.inference(z, None, target_class, noise_mode='const')
         # epoch += 1
 
 

@@ -1,3 +1,4 @@
+import random
 from collections import namedtuple
 
 import numpy as np
@@ -154,7 +155,6 @@ class Generator(nn.Module):
         mapping_kwargs: dict = {},         # Arguments for MappingNetwork.
         synthesis_kwargs: dict = {},       # Arguments for SynthesisNetwork.
     ):
-        # assert len(classes) == 2
         assert mode in ['split', 'joint']
         super(Generator, self).__init__()
         if freeze_teacher:
@@ -191,21 +191,32 @@ class Generator(nn.Module):
         self.block_resolutions = synthesis1.block_resolutions
         self.channel_dict = synthesis1.channel_dict
 
-    def forward(self, z, pose, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
-        # TODO enable style mixing training
-        assert z.shape[1] == self.z_dim
-        z = normalize_2nd_moment(z.to(torch.float32))
+    def forward(self, zs, pose, return_dlatent=False, **synthesis_kwargs) -> List[Dict[str, torch.Tensor]]:
+        assert all(z.shape[1] == self.z_dim for z in zs)
+        zs = [normalize_2nd_moment(z.to(torch.float32)) for z in zs]
+        if len(zs) > 1:
+            inject_idx = random.randint(1, self.num_layers - 1)
+            inject_idices = [inject_idx, self.num_layers - inject_idx]
+        else:
+            inject_idices = [self.num_layers]
 
+        # Mapping
+        ws = {class_name: [] for class_name in self.classes}
         if self.mode == 'joint':
-            c = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
-            z = z.repeat(len(self.classes), 1)
-            ws = self.mapping[self.classes[0]](z, c, broadcast=self.num_layers, normalize_z=False).chunk(len(self.classes))
-            ws = {class_name: w for class_name, w in zip(self.classes, ws)}
+            for z, n_broadcast in zip(zs, inject_idices):
+                c = torch.eye(len(self.classes), device=z.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
+                z = z.repeat(len(self.classes), 1)
+                w_list = self.mapping[self.classes[0]](z, c, broadcast=n_broadcast, normalize_z=False).chunk(len(self.classes))
+                for class_name, w in zip(self.classes, w_list):
+                    ws[class_name].append(w)
         else:  # split
-            ws = {}
             for class_name, mapping in self.mapping.items():
-                ws[class_name] = mapping(z, broadcast=self.num_layers, normalize_z=False)
+                for z, n_broadcast in zip(zs, inject_idices):
+                    ws[class_name].append(mapping(z, broadcast=n_broadcast, normalize_z=False))
 
+        ws = {class_name: torch.cat(w_list, dim=1) for class_name, w_list in ws.items()}
+
+        # Synthesis
         img, feats = {}, {}
         for class_name, synthesis, p in zip(self.classes, self.synthesis.values(), (None, pose)):
             img[class_name], feats[class_name] = synthesis(ws[class_name], pose=p, **synthesis_kwargs)
@@ -215,14 +226,14 @@ class Generator(nn.Module):
         return img, feats
 
     @torch.no_grad()
-    def inference(self, z, pose, target_class):
+    def inference(self, z, pose, target_class, **synthesis_kwargs):
         """ forward only through target class"""
         assert z.shape[1] == self.z_dim
         c = None
         if self.mode == 'joint':
             c = torch.eye(len(self.classes), device=z.device)[self.classes.index(target_class)][None, ...].repeat(z.shape[0], 1)
         w = self.mapping[target_class](z, c=c, broadcast=self.num_layers)
-        img, _ = self.synthesis[target_class](w, pose=pose)
+        img, _ = self.synthesis[target_class](w, pose=pose, **synthesis_kwargs)
         return img
 
     def requires_grad_with_freeze_(self, requires_grad: bool) -> None:
