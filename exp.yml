@@ -1,11 +1,10 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-FFHQ-Mix'
+name: 'Dbr-FFHQ-baseline'
 description: >
-    Reconsturction loss ref->target, replace ROI of target by resized ref, then train on GAN loss
+    stylegan2 baseline
 n_sample: 64
 resolution: 256
 classes:
-- 'ref'
 - 'target'
 
 ADA:
@@ -56,7 +55,7 @@ MODEL:
     feature_types: 'relu'
 
   DISCRIMINATOR:
-    img_channels: [3, 3]
+    img_channels: [3]
     c_dim: 0
     branch_res: 32
     top_res: 4
@@ -64,8 +63,8 @@ MODEL:
 
 
 TRAIN:
-  iteration: 300000
-  batch_gpu: 8
+  iteration: 600000
+  batch_gpu: 4
   lrate: 0.0025
   lrate_atten: 0.002
   R1:
@@ -77,7 +76,7 @@ TRAIN:
     bs_shrink: 2
   style_mixing_prob: 0.0
   CKPT:
-    path: ''
+    path: 'results/00082-13htg63w-8gpu-Dbr-FFHQ-baseline/checkpoints/ckpt-300000.pt'
     every: 6250
     max_keep: -1
   SAMPLE:
@@ -90,5 +89,5 @@ EVAL:
     every: 6250
     batch_gpu: 64
     n_sample: 50000
-    inception_cache: 'results/00070-3o1oeduv-8gpu-Dbr-FFHQ/inception_cache.pkl'
+    inception_cache: 'results/00072-1ekeybpf-8gpu-Dbr-FFHQ-Mix/inception_cache.pkl'
 

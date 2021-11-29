@@ -280,7 +280,7 @@ class FFHQ256(BaseDataset):
         self.target_dir = self.root / self.src[1]
         self.fileIDs = sorted(p.relative_to(self.ref_dir) for p in self.ref_dir.glob('**/*.png'))
         assert set(self.fileIDs) <= set([p.relative_to(self.target_dir) for p in self.target_dir.glob('**/*.png')])
-        self.targets = self.available_targets = ['ref', 'target']
+        self.targets = self.available_targets = ['target']
 
         self.num_items = len(self.fileIDs)
         if num_items is not None:

@@ -366,16 +366,17 @@ class Trainer():
 
         loss_Dmain = loss_Dr1 = 0
         if self.cfg.ADA.enabled:
-            data['ref'] = self.augment_pipe(data['ref'])
+            #data['ref'] = self.augment_pipe(data['ref'])
             data['target'] = self.augment_pipe(data['target'])
-        real = torch.cat([data['ref'], data['target']], dim=0 if self.d_.c_dim > 0 else 1).detach().requires_grad_(r1_reg)
+        real = data['target'].detach().requires_grad_(r1_reg)
+        # real = torch.cat([data['ref'], data['target']], dim=0 if self.d_.c_dim > 0 else 1).detach().requires_grad_(r1_reg)
 
-        z = torch.randn(data['ref'].shape[0], self.g_.z_dim, device=self.device)
+        z = torch.randn(data['target'].shape[0], self.g_.z_dim, device=self.device)
         with autocast(enabled=self.autocast):
             fake_imgs, _ = self.g(z, None)
-            small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
-            fake_imgs['mix'] = fake_imgs['target'].clone()
-            fake_imgs['mix'][:, :, 96:224, 64:192] = small_ref
+            #small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
+            #fake_imgs['mix'] = fake_imgs['target'].clone()
+            #fake_imgs['mix'][:, :, 96:224, 64:192] = small_ref
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
 
@@ -385,21 +386,21 @@ class Trainer():
                 c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
 
             fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
-            fake_mix = torch.cat([aug_fake_imgs[k] for k in ['ref', 'mix']], dim=cat_dim)
+            #fake_mix = torch.cat([aug_fake_imgs[k] for k in ['ref', 'mix']], dim=cat_dim)
             real_pred = self.d(real, c=c)
             fake_pred = self.d(fake, c=c)
-            fake_pred_mix = self.d(fake_mix, c=c)
+            #fake_pred_mix = self.d(fake_mix, c=c)
             real_loss = torch.nn.functional.softplus(-real_pred).mean()
             fake_loss = torch.nn.functional.softplus(fake_pred).mean()
-            fake_mix_loss = torch.nn.functional.softplus(fake_pred_mix).mean()
+            #fake_mix_loss = torch.nn.functional.softplus(fake_pred_mix).mean()
             self.stats[f"D-Real-Score"] = real_pred.mean().detach()
             self.stats[f"D-Fake-Score"] = fake_pred.mean().detach()
-            self.stats[f"D-FakeMix-Score"] = fake_pred_mix.mean().detach()
+            #self.stats[f"D-FakeMix-Score"] = fake_pred_mix.mean().detach()
             self.stats[f"loss/D-Real"] = real_loss.detach()
             self.stats[f"loss/D-Fake"] = fake_loss.detach()
-            self.stats[f"loss/D-FakeMix"] = fake_mix_loss.detach()
+            #self.stats[f"loss/D-FakeMix"] = fake_mix_loss.detach()
 
-            loss_Dmain = loss_Dmain + real_loss + fake_loss + fake_mix_loss
+            loss_Dmain = loss_Dmain + real_loss + fake_loss# + fake_mix_loss
 
             if self.cfg.ADA.enabled and self.cfg.ADA.target > 0:
                 self.ada_moments[0].add_(torch.ones_like(real_pred).sum())
@@ -424,15 +425,15 @@ class Trainer():
         if self.atten is not None:
             self.atten.requires_grad_(True)
 
-        z = torch.randn(data['ref'].shape[0], self.g_.z_dim, device=self.device)
+        z = torch.randn(data['target'].shape[0], self.g_.z_dim, device=self.device)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
             return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
             fake_imgs, feats = self.g(z, None, return_feat_res=return_feat_res)
-            small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
-            fake_imgs['mix'] = fake_imgs['target'].clone()
-            fake_imgs['mix'][:, :, 96:224, 64:192] = small_ref
+            #small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
+            #fake_imgs['mix'] = fake_imgs['target'].clone()
+            #fake_imgs['mix'][:, :, 96:224, 64:192] = small_ref
 
             aug_fake_imgs = {k: (self.augment_pipe(v) if self.cfg.ADA.enabled else v)
                              for k, v in fake_imgs.items()}
@@ -442,14 +443,14 @@ class Trainer():
                 c = torch.eye(len(self.g_.classes), device=self.device).unsqueeze(1).repeat(1, z.shape[0], 1).flatten(0, 1)
 
             fake = torch.cat([aug_fake_imgs[k] for k in self.g_.classes], dim=cat_dim)
-            fake_mix = torch.cat([aug_fake_imgs[k] for k in ['ref', 'mix']], dim=cat_dim)
+            #fake_mix = torch.cat([aug_fake_imgs[k] for k in ['ref', 'mix']], dim=cat_dim)
             fake_pred = self.d(fake, c=c)
-            fake_pred_mix = self.d(fake_mix, c=c)
+            #fake_pred_mix = self.d(fake_mix, c=c)
             gan_loss = torch.nn.functional.softplus(-fake_pred).mean()
-            gan_mix_loss = torch.nn.functional.softplus(-fake_pred_mix).mean()
+            #gan_mix_loss = torch.nn.functional.softplus(-fake_pred_mix).mean()
             self.stats['loss/G-GAN'] = gan_loss.detach()
-            self.stats['loss/G-GANMix'] = gan_mix_loss.detach()
-            loss_Gmain = loss_Gmain + gan_loss + gan_mix_loss
+            #self.stats['loss/G-GANMix'] = gan_mix_loss.detach()
+            loss_Gmain = loss_Gmain + gan_loss# + gan_mix_loss
 
             # attention feature reconstruction loss
             if self.atten is not None:
@@ -460,9 +461,9 @@ class Trainer():
                     self.stats[f'loss/attenL1-{res}x{res}'] = rec_loss
                     loss_Gmain = loss_Gmain + rec_loss
 
-            loss_rec = torch.nn.functional.l1_loss(small_ref.detach(), fake_imgs['target'][:, :, 96:224, 64:192])
-            self.stats['loss/G-reconstruction'] = loss_rec.detach()
-            loss_Gmain = loss_Gmain + loss_rec
+            #loss_rec = torch.nn.functional.l1_loss(small_ref.detach(), fake_imgs['target'][:, :, 96:224, 64:192])
+            #self.stats['loss/G-reconstruction'] = loss_rec.detach()
+            #loss_Gmain = loss_Gmain + loss_rec
         # self.g.zero_grad(set_to_none=True)
         # self.g_scaler.scale(loss_Gmain).backward()
         # self.g_scaler.step(self.g_optim)
@@ -526,7 +527,7 @@ class Trainer():
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(loader)).items()}
             self.real_samples = {k: self.all_gather(v) for k, v in self._samples.items()}
-            _samples = [self.real_samples[k] for k in ['ref', 'target']]
+            _samples = [self.real_samples[k] for k in ['target']]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
             save_image(
                 samples,
@@ -536,7 +537,7 @@ class Trainer():
                 value_range=(-1, 1),
             )
 
-        z = torch.randn([self._samples['ref'].shape[0], self.g_ema.z_dim], device=self.device)
+        z = torch.randn([self._samples['target'].shape[0], self.g_ema.z_dim], device=self.device)
         return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
         with torch.no_grad():
             _fake_imgs, feats = self.g_ema(z, None, return_feat_res=return_feat_res)
@@ -558,7 +559,7 @@ class Trainer():
                     self._samples['face_lm']
                 )
 
-            _samples = [fake_imgs[k] for k in ['ref', 'target']]
+            _samples = [fake_imgs[k] for k in ['target']]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
             save_image(
                 samples,
