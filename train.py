@@ -344,14 +344,14 @@ class Trainer():
             if self.cfg.ADA.enabled and self.cfg.ADA.target > 0 and (i % self.cfg.ADA.interval == 0):
                 self.update_ada()
 
-            if self.fid_tracker is not None and (i == 0 or (i + 1) % self.cfg.EVAL.FID.every == 0):
+            if self.fid_tracker is not None and (i == 0 or (i + 1) % self.cfg.EVAL.FID.every == 0 or i == self.cfg.TRAIN.iteration - 1):
                 fids = self.fid_tracker(self.g_ema.classes, self.infer_fn, (i + 1), save=(self.local_rank == 0))
                 self.stats.update({f'FID/{c}': torch.tensor(v, device=self.device) for c, v in fids.items()})
 
-            if (i + 1) % self.cfg.TRAIN.CKPT.every == 0:
+            if (i + 1) % self.cfg.TRAIN.CKPT.every == 0 or i == self.cfg.TRAIN.iteration - 1:
                 self.save_to_checkpoint(i + 1)
 
-            if (i + 1) % self.cfg.TRAIN.SAMPLE.every == 0:
+            if (i + 1) % self.cfg.TRAIN.SAMPLE.every == 0 or i == self.cfg.TRAIN.iteration - 1:
                 self.sampling(i + 1)
 
             if self.local_rank == 0:
@@ -372,7 +372,7 @@ class Trainer():
 
         # Style mixing
         n = 2 if random.random() < self.cfg.TRAIN.style_mixing_prob else 1
-        zs = torch.randn([n, data['ref'].shape[0], self.g_.z_dim], device=self.device).unbind(0)
+        zs = torch.randn([n, data[self.cfg.classes[0]].shape[0], self.g_.z_dim], device=self.device).unbind(0)
         with autocast(enabled=self.autocast):
             fake_imgs, _ = self.g(zs, None)
             small_ref = torch.nn.functional.interpolate(fake_imgs['ref'], scale_factor=0.5, mode='bicubic')
@@ -428,7 +428,7 @@ class Trainer():
 
         # Style mixing
         n = 2 if random.random() < self.cfg.TRAIN.style_mixing_prob else 1
-        zs = torch.randn([n, data['ref'].shape[0], self.g_.z_dim], device=self.device).unbind(0)
+        zs = torch.randn([n, data[self.cfg.classes[0]].shape[0], self.g_.z_dim], device=self.device).unbind(0)
         loss_Gmain = loss_Gpl = 0
         with autocast(enabled=self.autocast):
             # GAN loss
@@ -539,10 +539,10 @@ class Trainer():
                 value_range=(-1, 1),
             )
 
-        z = torch.randn([self._samples[self.cfg.classes[0]].shape[0], self.g_ema.z_dim], device=self.device)
+        z = [torch.randn([self._samples[self.cfg.classes[0]].shape[0], self.g_ema.z_dim], device=self.device)]
         return_feat_res = [] if self.atten_ is None else self.atten_.resolutions
         with torch.no_grad():
-            _fake_imgs, feats = self.g_ema(z, None, return_feat_res=return_feat_res)
+            _fake_imgs, feats = self.g_ema(z, None, return_feat_res=return_feat_res, noise_mode='const')
             if self.atten is not None:
                 atten_out = self.atten(feats, self.fixed_mask[0:1].repeat(z.shape[0], 1, 1, 1), self._samples['face_lm'], eval=True)
 

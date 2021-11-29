@@ -226,14 +226,14 @@ class Generator(nn.Module):
         return img, feats
 
     @torch.no_grad()
-    def inference(self, z, pose, target_class):
+    def inference(self, z, pose, target_class, **synthesis_kwargs):
         """ forward only through target class"""
         assert z.shape[1] == self.z_dim
         c = None
         if self.mode == 'joint':
             c = torch.eye(len(self.classes), device=z.device)[self.classes.index(target_class)][None, ...].repeat(z.shape[0], 1)
         w = self.mapping[target_class](z, c=c, broadcast=self.num_layers)
-        img, _ = self.synthesis[target_class](w, pose=pose)
+        img, _ = self.synthesis[target_class](w, pose=pose, **synthesis_kwargs)
         return img
 
     def requires_grad_with_freeze_(self, requires_grad: bool) -> None:

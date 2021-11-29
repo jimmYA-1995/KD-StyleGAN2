@@ -1,6 +1,7 @@
-import random
+import logging
 import json
 import pickle
+import random
 from collections import namedtuple
 from pathlib import Path
 from typing import List, Dict
@@ -274,19 +275,20 @@ class FFHQ256(BaseDataset):
         num_items: int = None
     ):
         super().__init__(root, resolution=resolution, sources=sources, xflip=xflip, split=split)
+        log = logging.getLogger('GPU{}'.format(torch.cuda.current_device()))
         if split is not None:
-            print("Ignore split args in FFHQ dataset")
+            log.warn("Ignore split args in FFHQ dataset")
         self.ref_dir = self.root / self.src[0]
         self.target_dir = self.root / self.src[1]
         self.fileIDs = sorted(p.relative_to(self.ref_dir) for p in self.ref_dir.glob('**/*.png'))
         assert set(self.fileIDs) <= set([p.relative_to(self.target_dir) for p in self.target_dir.glob('**/*.png')])
-        self.targets = self.available_targets = ['ref', 'target']
+        self.targets = self.available_targets = ['target']
 
         self.num_items = len(self.fileIDs)
         if num_items is not None:
             assert num_items > 0
             if num_items > len(self.fileIDs):
-                print(f"required #items is bigger than all dataset. Using whole dataset({len(self.fileIDs)} items)")
+                log.warn(f"required #items is bigger than all dataset. Using whole dataset({len(self.fileIDs)} items)")
 
             self.num_items = min(len(self.fileIDs), num_items)
 

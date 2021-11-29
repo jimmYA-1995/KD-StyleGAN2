@@ -61,10 +61,10 @@ MODEL:
     branch_res: 32
     top_res: 4
     channel_base: 32768
-
+    mbstd_group_size: 8
 
 TRAIN:
-  iteration: 300000
+  iteration: 390625
   batch_gpu: 8
   lrate: 0.0025
   lrate_atten: 0.002
@@ -75,20 +75,20 @@ TRAIN:
     every: 8
     gain: 2
     bs_shrink: 2
-  style_mixing_prob: 0.0
+  style_mixing_prob: 0.9
   ema: 20
   CKPT:
     path: ''
     every: 6250
     max_keep: -1
   SAMPLE:
-    every: 6250
+    every: 3125
 
 EVAL:
   metrics: 'fid'
   batch_gpu: 8
   FID:
-    every: 6250
+    every: 3125
     batch_gpu: 64
     n_sample: 50000
     inception_cache: ''
