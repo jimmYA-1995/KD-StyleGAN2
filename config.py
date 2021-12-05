@@ -28,8 +28,6 @@ _C.MODEL = CN()
 _C.MODEL.z_dim = 512
 _C.MODEL.w_dim = 512
 _C.MODEL.mode = ''  # ['split', 'join']
-_C.MODEL.freeze_teacher = False
-_C.MODEL.teacher_weight = ''
 
 _C.MODEL.MAPPING = CN()
 _C.MODEL.MAPPING.num_layers = 8
@@ -44,10 +42,6 @@ _C.MODEL.SYNTHESIS.pose_encoder_kwargs = CN(new_allowed=True)
 _C.MODEL.SYNTHESIS.pose_encoder_kwargs.name = 'DefaultPoseEncoder'
 _C.MODEL.SYNTHESIS.channel_base = 32768
 _C.MODEL.SYNTHESIS.channel_max = 512
-
-_C.MODEL.ATTENTION = CN()
-_C.MODEL.ATTENTION.resolutions = []
-_C.MODEL.ATTENTION.feature_types = 'relu'
 
 _C.MODEL.DISCRIMINATOR = CN()
 _C.MODEL.DISCRIMINATOR.c_dim = 0  # c_dim > 0: must equals to len(classes) and len(img_channels) == 1
@@ -66,7 +60,7 @@ _C.TRAIN = CN()
 _C.TRAIN.iteration = 80000
 _C.TRAIN.batch_gpu = 16
 _C.TRAIN.lrate = 0.002
-_C.TRAIN.lrate_atten = 0.002
+_C.TRAIN.use_mix_loss = False
 _C.TRAIN.PPL = CN()
 _C.TRAIN.PPL.gain = 2
 _C.TRAIN.PPL.bs_shrink = 2

@@ -57,7 +57,7 @@ class FIDTracker():
                 torch.distributed.barrier(device_ids=[rank])
             with dnnlib.util.open_url(detector_url, verbose=(rank == 0)) as f:
                 self.inceptionV3 = pickle.load(f).to(self.device)
-            # self.inceptionV3 = load_patched_inception_v3().eval().to(self.device)
+
             if self.rank == 0:
                 torch.distributed.barrier(device_ids=[rank])
         self.log.info("load inceptionV3 model complete ({:.2f} sec)".format(time.time() - start))
@@ -151,7 +151,7 @@ class FIDTracker():
                            "total_time": total_time,
                            "total_time_str": f"{int(total_time // 60)}m {int(total_time % 60)}s",
                            "num_gpus": self.num_gpus,
-                           "snapshot_pkl": "none",
+                           "snapshot_pkl": f"ckpt-{iteration :06d}.pt",
                            "timestamp": time.time()}
 
             with open(self.out_dir / 'metric-fid50k_full.jsonl', 'at') as f:
@@ -188,45 +188,6 @@ class FIDTracker():
         mean = np.mean(features, 0)
         cov = np.cov(features, rowvar=False)
         return mean, cov
-
-    @torch.no_grad()
-    def extract_feature_dict(self, img_generator):
-        cnt = 0
-        slicing_map = {
-            'human': (slice(None),) * 4,
-            'human-TopHalf': (slice(None), slice(None), slice(None, 128), slice(None)),
-            'human-BtmHalf': (slice(None), slice(None), slice(128, None), slice(None)),
-            'human-TopCentral': (slice(None), slice(None), slice(None, 128), slice(64, 192))
-        }
-        features_dict = {k: [] for k in slicing_map.keys()}
-        features = []
-        while True:
-            try:
-                imgs = next(img_generator)
-                imgs = (imgs * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            except StopIteration:
-                self.log.warn(f"Only get {cnt} images")
-
-            for k, features in features_dict.items():
-                feature = self.inceptionV3(imgs[slicing_map[k]], return_features=True)
-                if self.num_gpus > 1:
-                    _features = []
-                    for src in range(self.num_gpus):
-                        y = feature.clone()
-                        torch.distributed.broadcast(y, src=src)
-                        _features.append(y)
-                    feature = torch.stack(_features, dim=1).flatten(0, 1)
-                features.append(feature)
-            cnt += feature.shape[0]
-            if cnt >= self.n_sample:
-                break
-
-        mean_dict, cov_dict = dict(), dict()
-        for k, features in features_dict.items():
-            features = torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
-            mean_dict[k] = np.mean(features, 0)
-            cov_dict[k] = np.cov(features, rowvar=False)
-        return mean_dict, cov_dict
 
     def plot_figure(self):
         self.log.info(f"save FID figure in {self.out_dir / 'fid.png'}")

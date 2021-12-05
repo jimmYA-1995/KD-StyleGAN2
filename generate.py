@@ -50,5 +50,5 @@ if __name__ == '__main__':
     for c in g.classes:
         img_list = []
         for fake_imgs in generate_fn(c):
-            img_list.append(img_list)
+            img_list.append(fake_imgs)
         outs[c] = torch.cat(img_list, dim=0)

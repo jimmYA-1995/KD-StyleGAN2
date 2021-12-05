@@ -1,9 +1,9 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: 'Dbr-BrecaHad-Mix'
+name: ''
 description: >
-    Reconsturction loss ref->target, replace ROI of target by resized ref, then train on GAN loss
-n_sample: 32
-resolution: 512
+    Final version
+n_sample: 64
+resolution: 256
 classes:
 - 'ref'
 - 'target'
@@ -14,21 +14,21 @@ ADA:
   p: 0.0
   interval: 4
   kimg: 500
-  KWARGS:
-    aniso: 0
-    xfrac: 0
-    brightness: 0
-    contrast: 0
-    lumaflip: 0
-    hue: 0
-    saturation: 0
+  # KWARGS:
+  #   aniso: 0
+  #   xfrac: 0
+  #   brightness: 0
+  #   contrast: 0
+  #   lumaflip: 0
+  #   hue: 0
+  #   saturation: 0
 
 DATASET:
   name: FFHQ256
-  root: '~/data/BreCaHAD'
+  root: '~/data/FFHQ'
   sources:
-    - 'brecahad-ref'
-    - 'brecahad-target'
+    - 'images256x256-cropface'
+    - 'images256x256'
   xflip: true
   num_workers: 4
   pin_memory: true
@@ -37,8 +37,6 @@ MODEL:
   z_dim: 512
   w_dim: 512
   mode: 'joint'
-  freeze_teacher: false
-  teacher_weight: ''
 
   MAPPING:
     num_layers: 8
@@ -50,10 +48,6 @@ MODEL:
     img_channels: 3
     bottom_res: 4
     channel_base: 32768
-
-  ATTENTION:
-    resolutions: []
-    feature_types: 'relu'
 
   DISCRIMINATOR:
     img_channels: [3, 3]
@@ -67,10 +61,10 @@ TRAIN:
   iteration: 390625
   batch_gpu: 8
   lrate: 0.0025
-  lrate_atten: 0.002
+  use_mix_loss: false
   R1:
     every: 16
-    gamma: 0.5
+    gamma: 0.5  # float
   PPL:
     every: 8
     gain: 2
@@ -80,7 +74,7 @@ TRAIN:
   CKPT:
     path: ''
     every: 6250
-    max_keep: -1
+    max_keep: -1  # -1 to keep all
   SAMPLE:
     every: 3125
 
@@ -88,6 +82,11 @@ EVAL:
   metrics: 'fid'
   batch_gpu: 8
   FID:
+    every: 3125
+    batch_gpu: 64
+    n_sample: 50000
+    inception_cache: ''
+  KID:
     every: 3125
     batch_gpu: 64
     n_sample: 50000

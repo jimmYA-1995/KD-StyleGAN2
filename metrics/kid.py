@@ -70,7 +70,7 @@ class KIDTracker():
                 torch.distributed.barrier(device_ids=[rank])
             with dnnlib.util.open_url(detector_url, verbose=(rank == 0)) as f:
                 self.inceptionV3 = pickle.load(f).to(self.device)
-            # self.inceptionV3 = load_patched_inception_v3().eval().to(self.device)
+
             if self.rank == 0:
                 torch.distributed.barrier(device_ids=[rank])
         self.log.info("load inceptionV3 model complete ({:.2f} sec)".format(time.time() - start))
@@ -102,13 +102,7 @@ class KIDTracker():
             for c in self.classes:
                 self.log.info(f"Extract real features from '{c}'")
                 t = time.time()
-                if c == 'face':
-                    real_features[c] = self.extract_features(generator(ds, c))
-                elif c == 'human':
-                    feature_dict = self.extract_feature_dict(generator(ds, c))
-                    real_features.update(feature_dict)
-                else:
-                    raise ValueError("Unknown class for dataset")
+                real_features[c] = self.extract_features(generator(ds, c))
                 self.log.info(f"cost {time.time() - t :.2f} sec")
 
             if self.rank == 0:
@@ -126,15 +120,8 @@ class KIDTracker():
 
         for c in classes:
             self.log.info(f"Extract feature from {c} on {iteration} iteration")
-            if c == 'face':
-                sample_feature = self.extract_features(generator_fn(c))
-                kid[c] = calc_KID(self.real_features[c], sample_feature)
-            elif c == 'human':
-                sample_feature_dict = self.extract_feature_dict(generator_fn(c))
-                for k in sample_feature_dict.keys():
-                    kid[k] = calc_KID(self.real_features[k], sample_feature_dict[k])
-            else:
-                raise ValueError("Unknown class")
+            sample_feature = self.extract_features(generator_fn(c))
+            kid[c] = calc_KID(self.real_features[c], sample_feature)
 
         self.kids.append(kid)
         total_time = time.time() - start
@@ -150,7 +137,7 @@ class KIDTracker():
                            "total_time": total_time,
                            "total_time_str": f"{int(total_time // 60)}m {int(total_time % 60)}s",
                            "num_gpus": self.num_gpus,
-                           "snapshot_pkl": f"ckpt-{iteration: 06d}.pt",
+                           "snapshot_pkl": f"ckpt-{iteration :06d}.pt",
                            "timestamp": time.time()}
 
             with open(self.out_dir / 'metric-kid50k_full.jsonl', 'at') as f:
@@ -168,6 +155,7 @@ class KIDTracker():
                 imgs = (imgs * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             except StopIteration:
                 self.log.warn(f"Only get {cnt} images")
+                break
 
             feature = self.inceptionV3(imgs, return_features=True)
             if self.num_gpus > 1:
@@ -184,43 +172,6 @@ class KIDTracker():
 
         features = torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
         return features
-
-    @torch.no_grad()
-    def extract_feature_dict(self, img_generator):
-        cnt = 0
-        slicing_map = {
-            'human': (slice(None),) * 4,
-            'human-TopHalf': (slice(None), slice(None), slice(None, 128), slice(None)),
-            'human-BtmHalf': (slice(None), slice(None), slice(128, None), slice(None)),
-            'human-TopCentral': (slice(None), slice(None), slice(None, 128), slice(64, 192))
-        }
-        features_dict = {k: [] for k in slicing_map.keys()}
-        features = []
-        while True:
-            try:
-                imgs = next(img_generator)
-                imgs = (imgs * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            except StopIteration:
-                self.log.warn(f"Only get {cnt} images")
-
-            for k, features in features_dict.items():
-                feature = self.inceptionV3(imgs[slicing_map[k]], return_features=True)
-                if self.num_gpus > 1:
-                    _features = []
-                    for src in range(self.num_gpus):
-                        y = feature.clone()
-                        torch.distributed.broadcast(y, src=src)
-                        _features.append(y)
-                    feature = torch.stack(_features, dim=1).flatten(0, 1)
-                features.append(feature)
-            cnt += feature.shape[0]
-            if cnt >= self.n_sample:
-                break
-
-        features_dict = {k: torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
-                         for k, features in features_dict.items()}
-
-        return features_dict
 
     def plot_figure(self):
         self.log.info(f"save KID figure in {self.out_dir / 'kid.png'}")
