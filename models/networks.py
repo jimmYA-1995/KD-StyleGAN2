@@ -79,6 +79,7 @@ class SynthesisNetwork(nn.Module):
         self,
         w_dim: int,                        # Disentangled latent (W) dimensionality.
         img_resolution: int,               # Output resolution
+        num_classes: int = 1,                  # Number of classes
         img_channels: int = 3,             # Number of output color channels.
         bottom_res: int = 4,               # Resolution of bottom layer
         pose: bool = False,                # Whether to build Pose Encoder
@@ -105,7 +106,8 @@ class SynthesisNetwork(nn.Module):
         if pose:
             self.pose_encoder = build_pose_encoder(bottom_res, self.channel_dict[bottom_res], **pose_encoder_kwargs)
         if const:
-            self.const = nn.Parameter(torch.randn([self.channel_dict[bottom_res], bottom_res, bottom_res]))
+            for i in range(num_classes):
+                setattr(self, f'const{i}', nn.Parameter(torch.randn([self.channel_dict[bottom_res], bottom_res, bottom_res])))
 
         for res in self.block_resolutions:
             out_channels = self.channel_dict[res]
@@ -117,13 +119,13 @@ class SynthesisNetwork(nn.Module):
             self.add_module(f'b{res}_conv', SynthesisLayer(out_channels, out_channels, w_dim, res, resample_filter=resample_filter))
             self.add_module(f'b{res}_trgb', ToRGB(out_channels, img_channels, w_dim, resample_filter=resample_filter))
 
-    def forward(self, ws, pose=None, **layer_kwargs):
+    def forward(self, ws, c, pose=None, **layer_kwargs):
         if pose is not None:
             assert self.pose
             assert pose.shape[0] == ws.shape[0], f"{pose.shape[0]} v.s {ws.shape[0]}"
             btm_features = self.pose_encoder(pose)
         else:
-            btm_features = self.const.unsqueeze(0).repeat(ws.shape[0], 1, 1, 1)
+            btm_features = getattr(self, f'const{c}').unsqueeze(0).repeat(ws.shape[0], 1, 1, 1)
 
         x = btm_features
         img = None
@@ -164,7 +166,7 @@ class Generator(nn.Module):
         synthesis_args = (w_dim, img_resolution)
 
         if mode == 'joint':
-            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, **synthesis_kwargs)
+            synthesis1 = SynthesisNetwork(*synthesis_args, const=True, num_classes=len(classes), **synthesis_kwargs)
             mapping1 = MappingNetwork(z_dim=z_dim, c_dim=len(classes), w_dim=w_dim, **mapping_kwargs)
             self.mapping = nn.ModuleDict([[classes[i], mapping1] for i in range(len(classes))])
             self.synthesis = nn.ModuleDict([[classes[i], synthesis1] for i in range(len(classes))])
@@ -210,7 +212,7 @@ class Generator(nn.Module):
         img = {}
         for i, (class_name, synthesis) in enumerate(self.synthesis.items()):
             p = pose if i > 0 else None
-            img[class_name] = synthesis(ws[class_name], pose=p, **synthesis_kwargs)
+            img[class_name] = synthesis(ws[class_name], i, pose=p, **synthesis_kwargs)
 
         if return_dlatent:
             return img, ws
@@ -224,7 +226,7 @@ class Generator(nn.Module):
         if self.mode == 'joint':
             c = torch.eye(len(self.classes), device=z.device)[self.classes.index(target_class)][None, ...].repeat(z.shape[0], 1)
         w = self.mapping[target_class](z, c=c, broadcast=self.num_layers)
-        img = self.synthesis[target_class](w, pose=pose, **synthesis_kwargs)
+        img = self.synthesis[target_class](w, self.classes.index(target_class), pose=pose, **synthesis_kwargs)
         return img
 
 
