@@ -29,6 +29,7 @@ DATASET:
   sources:
     - 'images256x256-cropface'
     - 'images256x256'
+  # num_items: 1000  # Manually set #imgs before x-flip
   xflip: true
   num_workers: 4
   pin_memory: true

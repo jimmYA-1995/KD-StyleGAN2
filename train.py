@@ -178,7 +178,6 @@ class Trainer():
 
     @master_only
     def launch_wandb(self) -> wandb.run:
-        self.wandb_stats = dict()
         cfg = convert_to_dict(self.cfg)
         exp_name = cfg.pop('name')
         desc = cfg.pop('description')
@@ -206,10 +205,9 @@ class Trainer():
         if not self.use_wandb:
             return
 
+        self.wandb_stats = {k: v.item() for k, v in self.stats.items()}
         self.wandb_stats['epoch'] = self.epoch
-        self.wandb_stats.update(self.stats)
         self.run.log(self.wandb_stats, step=step)
-        self.wandb_stats = dict()
 
     def sample_forever(self, loader, pbar=False):
         """ Inifinite loader with optional progress bar. """
@@ -493,9 +491,10 @@ class Trainer():
     def sampling(self, i):
         """ inference & save sample images """
         if self._samples is None:
+            bs_gpu = (self.cfg.n_sample // self.num_gpus) + int(self.cfg.n_sample % self.num_gpus != 0)
             loader = torch.utils.data.DataLoader(
                 self.train_ds,
-                batch_size=self.cfg.n_sample // self.num_gpus,
+                batch_size=bs_gpu,
                 sampler=get_sampler(self.train_ds, eval=True, num_gpus=self.num_gpus)
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(loader)).items()}
@@ -516,7 +515,7 @@ class Trainer():
 
         fake_imgs = {}
         for cn, x in _fake_imgs.items():
-            fake_imgs[cn] = self.all_gather(x)
+            fake_imgs[cn] = self.all_gather(x)[:self.cfg.n_sample]
             if self.local_rank == 0:
                 assert fake_imgs[cn].shape[0] == self.cfg.n_sample
 
@@ -531,17 +530,15 @@ class Trainer():
                 value_range=(-1, 1),
             )
 
-    def all_gather(self, tensor, cat_dim=0):
-        """ All gather `tensor` and concatenate along `cat_dim`. When write this code,
-            NCCL does not support `gather`
-        """
+    def all_gather(self, tensor, dim=0):
+        """ All gather `tensor` and concatenate along `cat_dim`. """
         if self.num_gpus == 1:
             return tensor
 
         gather_list = [torch.zeros_like(tensor) for _ in range(self.num_gpus)]
         torch.distributed.all_gather(gather_list, tensor)
 
-        return torch.cat(gather_list, dim=cat_dim)
+        return torch.cat(gather_list, dim=dim)
 
     def clear(self):
         if getattr(self, 'pbar', None):

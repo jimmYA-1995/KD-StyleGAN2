@@ -19,6 +19,7 @@ _C.DATASET.name = 'DeepFashion'
 _C.DATASET.root = ''
 _C.DATASET.sources = ['align_1.2']
 _C.DATASET.xflip = False
+_C.DATASET.num_items = None
 # kwargs of data loader
 _C.DATASET.pin_memory = False
 _C.DATASET.num_workers = 4

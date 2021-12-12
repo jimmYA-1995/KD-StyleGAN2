@@ -206,7 +206,7 @@ def subprocess_fn(rank, args, cfg, temp_dir):
     args.ckpt = sorted(p for p in args.ckpt.glob('*.pt')) if args.ckpt.is_dir() else [args.ckpt]
     for ckpt in args.ckpt:
         print(f"load {str(ckpt)}")
-        iteration = int(str(ckpt.name)[5:11])
+        iteration = int(ckpt.stem.split('-')[-1])
         ckpt = torch.load(ckpt)
 
         g = create_model(cfg, device=device, eval_only=True)
@@ -242,6 +242,8 @@ if __name__ == '__main__':
     if args.cfg:
         cfg.merge_from_file(args.cfg)
 
+    if not Path(args.out_dir).exists():
+        Path(args.out_dir).mkdir(parents=True)
     assert args.num_gpus >= 1
     with tempfile.TemporaryDirectory() as temp_dir:
         if args.num_gpus == 1:

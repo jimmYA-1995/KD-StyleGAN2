@@ -64,7 +64,7 @@ class BaseDataset(data.Dataset):
         self.res = resolution
         self.src = sources
         self.xflip = xflip
-        self.num_items = None  # must be defined in inherited class
+        self._num_items = None  # must be defined in inherited class
         self.log = logging.getLogger('GPU{}'.format(torch.cuda.current_device()))
 
     @classmethod
@@ -73,7 +73,8 @@ class BaseDataset(data.Dataset):
             'resolution': cfg.resolution,
             'root': cfg.DATASET.root,
             'sources': cfg.DATASET.sources,
-            'xflip': cfg.DATASET.xflip
+            'xflip': cfg.DATASET.xflip,
+            'num_items': cfg.DATASET.num_items
         }
 
     @classmethod
@@ -83,8 +84,22 @@ class BaseDataset(data.Dataset):
         np.random.seed(worker_seed)
         # worker_info = torch.utils.data.get_worker_info()
 
+    def decide_datasize(self, required_num):
+        datasize = len(self.fileIDs)
+        if self.xflip:
+            datasize *= 2
+
+        if required_num is not None:
+            assert required_num > 0
+            if required_num > datasize:
+                self.log.warn(f"Total datasize is {datasize} while {required_num} is required")
+            datasize = min(datasize, required_num)
+
+        self._num_items = datasize
+        self.log.info(f"Total dataset: {self._num_items} (xflip: {self.xflip})")
+
     def __len__(self):
-        return self.num_items
+        return self._num_items
 
     def transform(
         self,
@@ -123,7 +138,7 @@ class DeepFashion(BaseDataset):
         sources: List[str] = None,
         xflip: bool = False,
         split: str = 'all',
-        num_items: int = float('inf'),
+        num_items: int = None,
     ):
         super().__init__(root, resolution, sources, xflip, split)
         assert len(self.src) == 2, "Assume source1 for Face & source2 for target(human)"
@@ -152,8 +167,7 @@ class DeepFashion(BaseDataset):
         assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.kp_dir.glob('*.pkl'))
 
-        total = len(self.fileIDs) * 2 if xflip else len(self.fileIDs)
-        self.num_items = min(total, num_items)
+        self.decide_datasize(num_items)
 
     def update_targets(self, targets: List[str]) -> None:
         if not all([t in self.available_targets for t in targets]):
@@ -284,16 +298,7 @@ class FFHQ256(BaseDataset):
         self.available_targets = ['ref', 'target']
         self.targets = ['target']
 
-        self.num_items = len(self.fileIDs)
-        if num_items is not None:
-            assert num_items > 0
-            if num_items > len(self.fileIDs):
-                self.log.warn(f"required #items is bigger than all dataset. Using whole dataset({len(self.fileIDs)} items)")
-
-            self.num_items = min(len(self.fileIDs), num_items)
-
-        if self.xflip:
-            self.num_items *= 2
+        self.decide_datasize(num_items)
 
     def update_targets(self, targets: List[str]) -> None:
         if not all([t in self.available_targets for t in targets]):
@@ -342,16 +347,7 @@ class AFHQv2(BaseDataset):
         self.available_targets = ['ref', 'target']
         self.targets = ['target']
 
-        self.num_items = len(self.fileIDs)
-        if num_items is not None:
-            assert num_items > 0
-            if num_items > len(self.fileIDs):
-                self.log.warn(f"required #items is bigger than all dataset. Using whole dataset({len(self.fileIDs)} items)")
-
-            self.num_items = min(len(self.fileIDs), num_items)
-
-        if self.xflip:
-            self.num_items *= 2
+        self.decide_datasize(num_items)
 
     def update_targets(self, targets: List[str]) -> None:
         if not all([t in self.available_targets for t in targets]):
@@ -392,7 +388,7 @@ class LsunCat_Patch(data.Dataset):
         sources: List[str] = None,
         split: str = 'all',
         xflip: bool = False,
-        num_items: int = float('inf')
+        num_items: int = None
     ):
         assert roots is not None and sources is not None
         assert len(roots) == 1, "Only support 1 data root directory. List is just for compatibility"
