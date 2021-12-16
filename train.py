@@ -24,6 +24,8 @@ from misc import *
 from models import *
 from metrics.fid import FIDTracker
 from torch_utils.misc import print_module_summary, constant
+from torch_utils.ops import conv2d_gradfix
+from torch_utils.ops import grid_sample_gradfix
 
 
 OUTDIR_MAX_LEN = 1024
@@ -56,6 +58,8 @@ class Trainer():
         stat_keys = ['mean_path_length']
         # ['g', 'd', 'real_score', 'fake_score', 'mean_path', 'r1', 'path', 'path_length']
 
+        conv2d_gradfix.enabled = True                         # Improves training speed.
+        grid_sample_gradfix.enabled = True                    # Avoids errors with the augmentation pipe.
         self.performance_and_reproducibility(**kwargs)
         self.wandb_id = None
         self.outdir = self.get_output_dir(cfg)
