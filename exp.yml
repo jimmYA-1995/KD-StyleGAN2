@@ -1,20 +1,20 @@
 # This is configuration for standard experiment. Please refer to config.py for more details.
-name: ''
+name: 'Experiment-name'
 description: >
-    Final version
+    Some description for this experiment. It will record on experiment tables
 n_sample: 64
 resolution: 256
-classes:
+classes:  # For current version, don't mod. this. 'ref' means the ROI part 'target' is our training target class
 - 'ref'
 - 'target'
 
 ADA:
   enabled: true
-  target: 0.6  # set 0 to fix prob.
+  target: 0.6  # set 0 to fix ADA probability to `p`
   p: 0.0
   interval: 4
   kimg: 500
-  # KWARGS:
+  # KWARGS:  # For custom disable some augmentation
   #   aniso: 0
   #   xfrac: 0
   #   brightness: 0
@@ -24,20 +24,20 @@ ADA:
   #   saturation: 0
 
 DATASET:
-  name: FFHQ256
+  name: FFHQ256  # Name for class in `dataset.py`
   root: '~/data/FFHQ'
   sources:
     - 'images256x256-cropface'
     - 'images256x256'
-  # num_items: 1000  # Manually set #imgs before x-flip
   xflip: true
+  # num_items: 1000  # Manually set #imgs after x-flip. (diff to NV's version which is before x-flip)
   num_workers: 4
   pin_memory: true
 
 MODEL:
   z_dim: 512
   w_dim: 512
-  mode: 'joint'
+  mode: 'joint'  # Available mode: ['joint', 'split']. Split mode might cause out of memory issue
 
   MAPPING:
     num_layers: 8
@@ -48,24 +48,24 @@ MODEL:
   SYNTHESIS:
     img_channels: 3
     bottom_res: 4
-    channel_base: 32768
+    channel_base: 16384  # Model capacity: 32768 = NV's 1x
 
   DISCRIMINATOR:
-    img_channels: [3, 3]
-    c_dim: 0
-    branch_res: 32
+    img_channels: [3, 3] # color channel for each branch. list length = #branches
+    c_dim: 0             # For conditional discriminator
+    branch_res: 32       # feature resolution to merge branches
     top_res: 4
-    channel_base: 32768
+    channel_base: 16384  # Model capacity: 32768 = NV's 1x
     mbstd_group_size: 8
 
 TRAIN:
-  iteration: 390625
-  batch_gpu: 8
+  iteration: 390625      # Target iteration (intead of additional iteration)
+  batch_gpu: 8           # Total batch size = batch_gpu * #gpus
   lrate: 0.0025
-  use_mix_loss: false
+  use_mix_loss: true     # Whether to use Fake Mix loss
   R1:
     every: 16
-    gamma: 0.5  # float
+    gamma: 1.0
   PPL:
     every: 8
     gain: 2
@@ -74,19 +74,19 @@ TRAIN:
   ema: 20
   CKPT:
     path: ''
-    every: 6250
+    every: 3125
     max_keep: -1  # -1 to keep all
   SAMPLE:
     every: 3125
 
 EVAL:
   metrics: 'fid'
-  batch_gpu: 8
+  batch_gpu: 8  # batch size for generator during evaluation
   FID:
     every: 3125
-    batch_gpu: 64
+    batch_gpu: 64  # batch size for extracting real features
     n_sample: 50000
-    inception_cache: ''
+    inception_cache: ''  # pickle file to store feature statistics(mean, covariance) for each class
   KID:
     every: 3125
     batch_gpu: 64

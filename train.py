@@ -9,7 +9,7 @@ from time import time
 
 import numpy as np
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision.utils import save_image
 from tqdm import tqdm
@@ -42,7 +42,7 @@ def parse_iter(filename):
 
 
 class Trainer():
-    def __init__(self, cfg, local_rank=0, debug=False, use_wandb=False, **kwargs) -> None:
+    def __init__(self, cfg, local_rank=0, debug=False, use_wandb=False, **performance_opts):
         t = time()
         self.cfg = cfg
         self.num_gpus = torch.cuda.device_count()
@@ -60,7 +60,7 @@ class Trainer():
 
         conv2d_gradfix.enabled = True                         # Improves training speed.
         grid_sample_gradfix.enabled = True                    # Avoids errors with the augmentation pipe.
-        self.performance_and_reproducibility(**kwargs)
+        self.performance_and_reproducibility(**performance_opts)
         self.wandb_id = None
         self.outdir = self.get_output_dir(cfg)
         self.log = setup_logger(self.outdir, local_rank, debug=debug)
@@ -100,6 +100,7 @@ class Trainer():
                 num_gpus=self.num_gpus
             )
 
+        # Training stats will be aggregated accross all GPUs for monitoring
         self.stats = OrderedDict([(k, torch.tensor(0.0, device=self.device)) for k in stat_keys])
 
         self.ckpt_required_keys = ["g", "atten", "d", "g_ema", "g_optim", "d_optim", "stats"]
@@ -113,9 +114,11 @@ class Trainer():
                 self.stats['ada_p'] = torch.as_tensor(cfg.ADA.p, device=self.device)
             self.augment_pipe.p.copy_(self.stats['ada_p'])
             if cfg.ADA.target > 0:
+                self.log.info("Adaptively adjust ADA probability")
                 self.ada_moments = torch.zeros([2], device=self.device)  # [num_scalars, sum_of_scalars]
                 self.ada_sign = torch.tensor(0.0, dtype=torch.float, device=self.device)
 
+        # For compatibility of single/multi GPU training
         self.g_, self.d_ = self.g, self.d
         if self.num_gpus > 1:
             self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
@@ -133,12 +136,18 @@ class Trainer():
 
         torch.backends.cudnn.benchmark = cudnn_benchmark
         self.autocast = True if amp else False
-        self.g_scaler = GradScaler(enabled=amp)
-        self.d_scaler = GradScaler(enabled=amp)
         # TODO allow using tf32 for matmul and convolution
+        # Decide which is better? gradscaler or `torch.nan_to_num`
 
     def get_output_dir(self, cfg) -> Path:
+        """ Get output folder name
+            1. Decide serial No. (the biggest + 1)
+            2. concat unique ID produced by weight & bias
+            3. concat name defined by user (in configuration file)
+            4. Sync folder name accross each process
+        """
         if self.num_gpus > 1:
+            # Legacy. The latest pytorch can sync python string now
             sync_data = torch.zeros([OUTDIR_MAX_LEN, ], dtype=torch.uint8, device=self.device)
 
         if self.local_rank == 0:
@@ -280,13 +289,11 @@ class Trainer():
             'g_ema': self.g_ema.state_dict(),
             'g_optim': self.g_optim.state_dict(),
             'd_optim': self.d_optim.state_dict(),
-            'g_scaler': self.g_scaler.state_dict(),
-            'd_scaler': self.d_scaler.state_dict(),
             'stats': self.stats,
         }
 
         torch.save(snapshot, ckpt_dir / f'ckpt-{i :06d}.pt')
-        del snapshot
+        del snapshot  # Conserve memory
         ckpt_paths = list()
         if cfg.max_keep != -1 and len(ckpt_paths) > cfg.ckpt_max_keep:
             ckpts = sorted([p for p in ckpt_dir.glob('*.pt')], key=lambda p: p.name[5:11], reverse=True)
@@ -348,7 +355,7 @@ class Trainer():
 
         real = torch.cat([data['ref'], data['target']], dim=0 if self.d_.c_dim > 0 else 1).detach().requires_grad_(r1_reg)
 
-        # Style mixing
+        # Style mixing regularization
         n = 2 if random.random() < self.cfg.TRAIN.style_mixing_prob else 1
         zs = torch.randn([n, data[self.cfg.classes[0]].shape[0], self.g_.z_dim], device=self.device).unbind(0)
         roi_row, roi_col = self.train_ds.ROI
@@ -399,15 +406,17 @@ class Trainer():
 
         d_loss = loss_Dmain + loss_Dr1
         self.d.zero_grad(set_to_none=True)
-        self.d_scaler.scale(d_loss).backward()
-        self.d_scaler.step(self.d_optim)
-        self.d_scaler.update()
+        d_loss.backward()
+        for param in self.d_.parameters():
+            if param.grad is not None:
+                torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
+        self.d_optim.step()
 
     def Gmain(self, data, pl_reg=False):
         self.g.requires_grad_(True)
         self.d.requires_grad_(False)
 
-        # Style mixing
+        # Style mixing regularization
         n = 2 if random.random() < self.cfg.TRAIN.style_mixing_prob else 1
         zs = torch.randn([n, data['target'].shape[0], self.g_.z_dim], device=self.device).unbind(0)
         roi_row, roi_col = self.train_ds.ROI
@@ -460,9 +469,11 @@ class Trainer():
 
         g_loss = loss_Gmain + loss_Gpl
         self.g.zero_grad(set_to_none=True)
-        self.g_scaler.scale(g_loss).backward()
-        self.g_scaler.step(self.g_optim)
-        self.g_scaler.update()
+        g_loss.backward()
+        for param in self.g_.parameters():
+            if param.grad is not None:
+                torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
+        self.g_optim.step()
 
     def reduce_stats(self):
         """ Reduce all training stats to master for reporting. """
