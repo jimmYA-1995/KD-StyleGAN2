@@ -272,6 +272,56 @@ class DeepFashion(BaseDataset):
 
         return data
 
+@register
+class Anime_wb(BaseDataset):
+    @configurable
+    def __init__(
+        self,
+        root: str,
+        resolution: int = 256,
+        sources: List[str] = None,
+        xflip: bool = False,
+        split: str = None,
+        num_items: int = None
+    ):
+        assert len(sources) == 1, "Only require 1 source for Anime-White-Background dataset"
+        super().__init__(root, resolution=resolution, sources=sources, xflip=xflip, split=split)
+
+        if split is not None:
+            self.log.warn("Ignore split args in FFHQ dataset")
+
+        self.ROI = (slice(32, 64), slice(112, 144))
+        self.target_dir = self.root / self.src[0]
+        self.fileIDs = sorted(p.relative_to(self.target_dir) for p in self.target_dir.glob('**/*.jpg'))
+        self.available_targets = ['ref', 'target']
+        self.targets = ['target']
+
+        self.decide_datasize(num_items)
+
+    def update_targets(self, targets: List[str]) -> None:
+        if not all([t in self.available_targets for t in targets]):
+            raise ValueError(f"Some of desire targets is not available. "
+                             f"Available targets for {self.__class__.__name__} dataset: {self.available_targets}")
+        self.targets = targets
+
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        assert idx < len(self), f"{idx} v.s {len(self)}"
+        try:
+            xflip = self.xflip and idx > len(self.fileIDs)
+            fileID = self.fileIDs[idx % len(self.fileIDs)]
+        except IndexError as e:
+            raise RuntimeError("Invalid dataset index: {idx} (xflip={xflip})") from e
+
+        data = {}
+        im = io.imread(self.target_dir / fileID)
+        if 'ref' in self.targets:
+            crop = im[self.ROI].copy()
+            resize_crop = cv2.resize(crop, (self.res, self.res), interpolation=cv2.INTER_LANCZOS4)
+            data['ref'] = self.transform(resize_crop, xflip=xflip)
+        if 'target' in self.targets:
+            data['target'] = self.transform(im, xflip=xflip)
+
+        return data
 
 @register
 class FFHQ256(BaseDataset):
