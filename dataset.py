@@ -9,11 +9,13 @@ import cv2
 import numpy as np
 import torch
 import skimage.io as io
+import torch_xla
+import torch_xla.core.xla_model as xm
 from PIL import Image
 from torch.utils import data
 
 from config import configurable
-from misc import cords_to_map, draw_pose_from_cords, ffhq_alignment
+# from misc import cords_to_map, draw_pose_from_cords, ffhq_alignment
 
 
 DATASET = {}
@@ -33,11 +35,16 @@ def get_dataset(cfg, **override_kwargs):
     return ds_cls(cfg, **override_kwargs)
 
 
-def get_sampler(ds, eval=False, num_gpus=1):
+def get_sampler(ds, eval=False, num_gpus=1, local_rank=0):
     """ Help function to decide suitable sampler """
     if num_gpus > 1:
         sampler = torch.utils.data.DistributedSampler(
-            ds, shuffle=(not eval), drop_last=(not eval))
+            ds,
+            num_replicas=num_gpus,
+            rank=local_rank,
+            shuffle=(not eval),
+            drop_last=(not eval)
+        )
     elif not eval:
         sampler = torch.utils.data.RandomSampler(ds)
     else:
@@ -65,7 +72,7 @@ class BaseDataset(data.Dataset):
         self.src = sources
         self.xflip = xflip
         self._num_items = None  # must be defined in inherited class
-        self.log = logging.getLogger('GPU{}'.format(torch.cuda.current_device()))
+        self.log = logging.getLogger('GPU{}'.format(xm.get_ordinal()))
 
     @classmethod
     def from_config(cls, cfg):
@@ -160,12 +167,9 @@ class DeepFashion(BaseDataset):
 
         self.face_dir = self.root / self.src[0] / 'face'
         self.human_dir = self.root / f'r{self.res}' / sources[1]
-        self.kp_dir = self.root / 'kp_heatmaps/keypoints'
-        self.dlib_ann = json.load(open(self.root / 'df_landmarks.json', 'r'))
-        assert self.face_dir.exists() and self.human_dir.exists() and self.kp_dir.exists()
+        assert self.face_dir.exists() and self.human_dir.exists()
         assert set(self.fileIDs) <= set(p.stem for p in self.face_dir.glob('*.png'))
         assert set(self.fileIDs) <= set(p.stem for p in self.human_dir.glob('*.png'))
-        assert set(self.fileIDs) <= set(p.stem for p in self.kp_dir.glob('*.pkl'))
 
         self.decide_datasize(num_items)
 

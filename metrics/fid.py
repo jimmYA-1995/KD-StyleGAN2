@@ -8,6 +8,8 @@ from functools import partial
 from pathlib import Path
 
 import torch
+import torch_xla
+import torch_xla.core.xla_model as xm
 import numpy as np
 import scipy.linalg
 import matplotlib.pyplot as plt
@@ -33,7 +35,7 @@ class FIDTracker():
 
         self.rank = rank
         self.num_gpus = num_gpus
-        self.device = torch.device('cuda', rank) if num_gpus > 1 else 'cuda'
+        self.device = xm.xla_device()  #torch.device('cuda', rank) if num_gpus > 1 else 'cuda'
         self.classes = cfg.classes
         self.cfg = cfg.EVAL.FID
         self.log = logging.getLogger(f'GPU{rank}')
@@ -54,12 +56,13 @@ class FIDTracker():
                 self.inceptionV3 = pickle.load(f).to(self.device)
         else:
             if self.rank != 0:
-                torch.distributed.barrier(device_ids=[rank])
+                xm.rendezvous('load-detector')
+                
             with dnnlib.util.open_url(detector_url, verbose=(rank == 0)) as f:
                 self.inceptionV3 = pickle.load(f).to(self.device)
 
             if self.rank == 0:
-                torch.distributed.barrier(device_ids=[rank])
+                xm.rendezvous('load-detector')
         self.log.info("load inceptionV3 model complete ({:.2f} sec)".format(time.time() - start))
 
         # get features for real images
@@ -163,6 +166,7 @@ class FIDTracker():
     def extract_features(self, img_generator):
         cnt = 0
         features = []
+        i = 0
         while True:
             try:
                 imgs = next(img_generator)
@@ -173,18 +177,19 @@ class FIDTracker():
 
             feature = self.inceptionV3(imgs, return_features=True)
             if self.num_gpus > 1:
-                _features = []
-                for src in range(self.num_gpus):
-                    y = feature.clone()
-                    torch.distributed.broadcast(y, src=src)
-                    _features.append(y)
-                feature = torch.stack(_features, dim=1).flatten(0, 1)
+                feature = xm.all_gather(feature.unsqueeze(1), dim=1).flatten(0, 1)
+
             features.append(feature)
             cnt += feature.shape[0]
             if cnt >= self.n_sample:
                 break
 
+            if self.rank == 0 and i % 100 == 0 or i == 10:
+                print("i = ", i)
+            i += 1
+
         features = torch.cat(features, dim=0)[:self.n_sample].cpu().numpy()
+        print("features: ", features.shape)
         mean = np.mean(features, 0)
         cov = np.cov(features, rowvar=False)
         return mean, cov

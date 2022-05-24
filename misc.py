@@ -11,7 +11,8 @@ import cv2
 import numpy as np
 import scipy.ndimage
 from PIL import Image
-from skimage.draw import circle, line_aa
+import skimage.draw
+# from skimage.draw import circle, line_aa
 
 
 LIMB_SEQ = [[0, 1], [0, 2], [1, 3], [2, 4], [5, 6], [5, 7], [6, 8], [7, 9], [8, 10], [5, 11], [6, 12], [11, 13], [12, 14], [13, 15], [14, 16]]
@@ -122,28 +123,28 @@ def cords_to_map(cords, img_size, old_size=None, affine_matrix=None, sigma=6):
     return result
 
 
-def draw_pose_from_cords(pose_joints, img_size, radius=2, draw_joints=True):
-    colors = np.zeros(shape=img_size + (3, ), dtype=np.uint8)
-    mask = np.zeros(shape=img_size, dtype=bool)
+# def draw_pose_from_cords(pose_joints, img_size, radius=2, draw_joints=True):
+#     colors = np.zeros(shape=img_size + (3, ), dtype=np.uint8)
+#     mask = np.zeros(shape=img_size, dtype=bool)
 
-    if draw_joints:
-        for f, t in LIMB_SEQ:
-            from_missing = pose_joints[f][0] == MISSING_VALUE or pose_joints[f][1] == MISSING_VALUE
-            to_missing = pose_joints[t][0] == MISSING_VALUE or pose_joints[t][1] == MISSING_VALUE
-            if from_missing or to_missing:
-                continue
-            yy, xx, val = line_aa(pose_joints[f][0], pose_joints[f][1], pose_joints[t][0], pose_joints[t][1])
-            colors[yy, xx] = np.expand_dims(val, 1) * 255
-            mask[yy, xx] = True
+#     if draw_joints:
+#         for f, t in LIMB_SEQ:
+#             from_missing = pose_joints[f][0] == MISSING_VALUE or pose_joints[f][1] == MISSING_VALUE
+#             to_missing = pose_joints[t][0] == MISSING_VALUE or pose_joints[t][1] == MISSING_VALUE
+#             if from_missing or to_missing:
+#                 continue
+#             yy, xx, val = line_aa(pose_joints[f][0], pose_joints[f][1], pose_joints[t][0], pose_joints[t][1])
+#             colors[yy, xx] = np.expand_dims(val, 1) * 255
+#             mask[yy, xx] = True
 
-    for i, joint in enumerate(pose_joints):
-        if pose_joints[i][0] == MISSING_VALUE or pose_joints[i][1] == MISSING_VALUE:
-            continue
-        yy, xx = circle(joint[0], joint[1], radius=radius, shape=img_size)
-        colors[yy, xx] = COLORS[i]
-        mask[yy, xx] = True
+#     for i, joint in enumerate(pose_joints):
+#         if pose_joints[i][0] == MISSING_VALUE or pose_joints[i][1] == MISSING_VALUE:
+#             continue
+#         yy, xx = circle(joint[0], joint[1], radius=radius, shape=img_size)
+#         colors[yy, xx] = COLORS[i]
+#         mask[yy, xx] = True
 
-    return colors, mask
+#     return colors, mask
 
 
 def ffhq_alignment(

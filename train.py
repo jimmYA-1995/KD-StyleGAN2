@@ -1,17 +1,22 @@
 import copy
 import functools
 import os
+os.environ["TPU_CHIPS_PER_HOST_BOUNDS"] = "2,2,1"
+os.environ["TPU_HOST_BOUNDS"] = "1,1,1"
+os.environ["TPU_VISIBLE_DEVICES"] = "0,1,2,3"
 import random
+import sys
 import warnings
 from collections import OrderedDict
 from pathlib import Path
 from time import time
 
 import numpy as np
+import skimage.io as io
 import torch
-from torch.cuda.amp import autocast
+## from torch.cuda.amp import autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torchvision.utils import save_image
+from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 import wandb
 
@@ -26,6 +31,19 @@ from metrics.fid import FIDTracker
 from torch_utils.misc import print_module_summary, constant
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import grid_sample_gradfix
+
+import torch_xla
+import torch_xla.debug.metrics as met
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla.utils.utils as xu
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
+import torch_xla.test.test_utils as test_utils
+from torch_xla.amp import autocast## , GradScaler
+# try:
+#   from torch_xla.amp import syncfree
+# except ImportError:
+#   assert False, "Missing package syncfree; the package is available in torch-xla>=1.11"
 
 
 OUTDIR_MAX_LEN = 1024
@@ -42,14 +60,15 @@ def parse_iter(filename):
 
 
 class Trainer():
-    def __init__(self, cfg, local_rank=0, debug=False, use_wandb=False, **performance_opts):
+    def __init__(self, cfg, local_rank=0, debug=False, use_wandb=False, outdir='test', **performance_opts):
         t = time()
         self.cfg = cfg
-        self.num_gpus = torch.cuda.device_count()
+        self.num_gpus = xm.xrt_world_size()
         self.local_rank = local_rank
-        self.device = torch.device(f'cuda:{local_rank}')
+        self.device = xm.xla_device() # device in folked process always be xla:0
         self.batch_gpu = cfg.TRAIN.batch_gpu
         self.start_iter = 0
+        self.outdir = outdir
         self.use_wandb = use_wandb
         self.metrics = cfg.EVAL.metrics
         self.fid_tracker = None
@@ -62,7 +81,6 @@ class Trainer():
         grid_sample_gradfix.enabled = True                    # Avoids errors with the augmentation pipe.
         self.performance_and_reproducibility(**performance_opts)
         self.wandb_id = None
-        self.outdir = self.get_output_dir(cfg)
         self.log = setup_logger(self.outdir, local_rank, debug=debug)
         if local_rank == 0:
             (self.outdir / 'config.yml').write_text(cfg.dump())
@@ -82,7 +100,7 @@ class Trainer():
         self.d_optim = torch.optim.Adam(self.d.parameters(), lr=cfg.TRAIN.lrate * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio))
 
         # Print network summary tables.
-        if self.local_rank == 0:
+        if self.local_rank == 0:  ## if xm.is_master_ordinal():
             z = [torch.empty([self.batch_gpu, self.g.z_dim], device=self.device)]
             c = torch.empty([self.batch_gpu * len(cfg.classes), self.d.c_dim], device=self.device) if self.d.c_dim > 0 else None
             heatmaps = None
@@ -120,9 +138,9 @@ class Trainer():
 
         # For compatibility of single/multi GPU training
         self.g_, self.d_ = self.g, self.d
-        if self.num_gpus > 1:
-            self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
-            self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        # if self.num_gpus > 1:
+        #     self.g = DDP(self.g, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        #     self.d = DDP(self.d, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         if use_wandb:
             self.run = self.launch_wandb()
@@ -138,56 +156,6 @@ class Trainer():
         self.autocast = True if amp else False
         # TODO allow using tf32 for matmul and convolution
         # Decide which is better? gradscaler or `torch.nan_to_num`
-
-    def get_output_dir(self, cfg) -> Path:
-        """ Get output folder name
-            1. Decide serial No. (the biggest + 1)
-            2. concat unique ID produced by weight & bias
-            3. concat name defined by user (in configuration file)
-            4. Sync folder name accross each process
-        """
-        if self.num_gpus > 1:
-            # Legacy. The latest pytorch can sync python string now
-            sync_data = torch.zeros([OUTDIR_MAX_LEN, ], dtype=torch.uint8, device=self.device)
-
-        if self.local_rank == 0:
-            root = Path(cfg.out_root)
-            if not root.exists():
-                print('populate {} as experiment root directory'.format(root))
-                root.mkdir(parents=True)
-
-            exp_name = ''
-            existing_serial_num = [int(x.name[:5]) for x in root.glob("[0-9]" * 5 + "-*") if x.is_dir()]
-            serial_num = max(existing_serial_num) + 1 if existing_serial_num else 0
-            exp_name += str(serial_num).zfill(5)
-
-            if self.use_wandb:
-                if 'WANDB_RESUME' in os.environ and os.environ['WANDB_RESUME'] == 'must':
-                    # resume training. reuse run id
-                    self.wandb_id = os.environ['WANDB_RUN_ID']
-                else:
-                    self.wandb_id = wandb.util.generate_id()
-                exp_name += f'-{self.wandb_id}'
-
-            cfg_name = cfg.name if cfg.name else 'default'
-            exp_name += f'-{self.num_gpus}gpu-{cfg_name}'
-            outdir = root / exp_name
-            outdir.mkdir(parents=True)
-            (outdir / 'samples').mkdir()
-            (outdir / 'checkpoints').mkdir()
-
-            if self.num_gpus > 1:
-                ascii = [ord(c) for c in str(outdir)]
-                assert len(ascii) <= OUTDIR_MAX_LEN
-                for i in range(len(ascii)):
-                    sync_data[i] = ascii[i]
-                torch.distributed.broadcast(sync_data, src=0)
-        elif self.num_gpus > 1:
-            torch.distributed.broadcast(sync_data, src=0)
-            ascii = list(sync_data[torch.nonzero(sync_data, as_tuple=True)].cpu())
-            outdir = Path(''.join([chr(a) for a in ascii]))
-
-        return outdir
 
     @master_only
     def launch_wandb(self) -> wandb.run:
@@ -224,11 +192,13 @@ class Trainer():
 
     def sample_forever(self, loader, pbar=False):
         """ Inifinite loader with optional progress bar. """
+        _loader = loader._loader._loader
+        # _loader = loader._loader if isinstance(loader, pl.MpDeviceLoader) or isinstance(loader, pl.ParallelLoader) else loader
         # epoch value may incorrect if we resume training with different num_gpus.
-        self.epoch = self.start_iter * self.batch_gpu * self.num_gpus // len(loader.dataset)
+        self.epoch = self.start_iter * self.batch_gpu * self.num_gpus // len(_loader.dataset)
         while True:
             if self.num_gpus > 1:
-                loader.sampler.set_epoch(self.epoch)
+                _loader.sampler.set_epoch(self.epoch)
 
             for batch in loader:
                 if isinstance(batch, dict):
@@ -277,7 +247,7 @@ class Trainer():
             else:
                 obj.load_state_dict(value)
 
-    @master_only
+    # @master_only
     def save_to_checkpoint(self, i):
         """ Save checktpoint. Default format: ckpt-000001.pt """
         cfg = self.cfg.TRAIN.CKPT
@@ -292,13 +262,15 @@ class Trainer():
             'stats': self.stats,
         }
 
-        torch.save(snapshot, ckpt_dir / f'ckpt-{i :06d}.pt')
+        ## torch.save(snapshot, ckpt_dir / f'ckpt-{i :06d}.pt')
+        xm.save(snapshot, ckpt_dir / f'ckpt-{i :06d}.pt')
         del snapshot  # Conserve memory
-        ckpt_paths = list()
-        if cfg.max_keep != -1 and len(ckpt_paths) > cfg.ckpt_max_keep:
-            ckpts = sorted([p for p in ckpt_dir.glob('*.pt')], key=lambda p: p.name[5:11], reverse=True)
-            for to_removed in ckpts[cfg.max_keep:]:
-                os.remove(to_removed)
+        if self.local_rank == 0:
+            ckpt_paths = list()
+            if cfg.max_keep != -1 and len(ckpt_paths) > cfg.ckpt_max_keep:
+                ckpts = sorted([p for p in ckpt_dir.glob('*.pt')], key=lambda p: p.name[5:11], reverse=True)
+                for to_removed in ckpts[cfg.max_keep:]:
+                    os.remove(to_removed)
 
     def train(self):
         self.train_ds.update_targets(['ref', 'target'])
@@ -306,27 +278,50 @@ class Trainer():
         train_loader = torch.utils.data.DataLoader(
             self.train_ds,
             batch_size=self.batch_gpu,
-            sampler=get_sampler(self.train_ds, num_gpus=self.num_gpus),
+            sampler=get_sampler(self.train_ds, num_gpus=self.num_gpus, local_rank=self.local_rank),
             num_workers=self.cfg.DATASET.num_workers,
             pin_memory=self.cfg.DATASET.pin_memory,
             persistent_workers=self.cfg.DATASET.num_workers > 0,
             worker_init_fn=self.train_ds.__class__.worker_init_fn if self.cfg.DATASET.num_workers > 0 else None
         )
+        # train_loader = pl.MpDeviceLoader(train_loader, self.device)
+        train_loader = pl.ParallelLoader(train_loader, [self.device]).per_device_loader(self.device)
         loader = self.sample_forever(train_loader, pbar=(self.local_rank == 0))
 
         for i in range(self.start_iter, self.cfg.TRAIN.iteration):
+            if self.local_rank == 0:
+                t = time()
             data = next(loader)
+            if self.local_rank == 0:
+                print(f"fetch data: {time() - t: .2f} sec")
+                t = time()
 
             self.Dmain(data, r1_reg=(self.cfg.TRAIN.R1.every != -1 and i % self.cfg.TRAIN.R1.every == 0))
+            if self.local_rank == 0:
+                print(f"Dmain: {time() - t: .2f} sec")
+                t = time()
             self.Gmain(data, pl_reg=(self.cfg.TRAIN.PPL.every != -1 and i % self.cfg.TRAIN.PPL.every == 0))
 
-            self.ema(ema_beta=ema_beta)
+            if self.local_rank == 0:
+                print(f"Gmain: {time() - t: .2f} sec")
+                t = time()
+            # self.ema(ema_beta=ema_beta)
+
+            # if self.local_rank == 0:
+            #     print(f"EMA: {time() - t: .2f} sec")
+                # t = time()
             self.reduce_stats()
 
+            if self.local_rank == 0:
+                print(f"reduce stats: {time() - t: .2f} sec")
+                t = time()
             # FID
             if self.cfg.ADA.enabled and self.cfg.ADA.target > 0 and (i % self.cfg.ADA.interval == 0):
                 self.update_ada()
 
+            if self.local_rank == 0:
+                print(f"update ADA: {time() - t: .2f} sec")
+                t = time()
             if self.fid_tracker is not None and (i == 0 or (i + 1) % self.cfg.EVAL.FID.every == 0 or i == self.cfg.TRAIN.iteration - 1):
                 fids = self.fid_tracker(self.g_ema.classes, self.infer_fn, (i + 1), save=(self.local_rank == 0))
                 self.stats.update({f'FID/{c}': torch.tensor(v, device=self.device) for c, v in fids.items()})
@@ -340,7 +335,11 @@ class Trainer():
             if self.local_rank == 0:
                 self.log_wandb(step=i)
 
+            if self.local_rank == 0:
+                print(f"MISC: {time() - t: .2f} sec")
+                t = time()
         self.clear()
+        xm.rendezvous('finished')
 
     def Dmain(self, data, r1_reg=False):
         """ GAN loss & (opt.)R1 regularization """
@@ -410,7 +409,9 @@ class Trainer():
         for param in self.d_.parameters():
             if param.grad is not None:
                 torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-        self.d_optim.step()
+        # self.d_optim.step()
+        # xm.mark_step()
+        xm.optimizer_step(self.d_optim, barrier=True)
 
     def Gmain(self, data, pl_reg=False):
         self.g.requires_grad_(True)
@@ -473,7 +474,9 @@ class Trainer():
         for param in self.g_.parameters():
             if param.grad is not None:
                 torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-        self.g_optim.step()
+        # self.g_optim.step()
+        # xm.mark_step()
+        xm.optimizer_step(self.g_optim, barrier=True)
 
     def reduce_stats(self):
         """ Reduce all training stats to master for reporting. """
@@ -482,11 +485,10 @@ class Trainer():
                 self.log.warning("calling reduce Op. while there is no stats.")
             return
 
-        stat_list = [torch.stack(list(self.stats.values()), dim=0)]
-        torch.distributed.reduce_multigpu(stat_list, dst=0)
-
-        if self.local_rank == 0:
-            self.stats = OrderedDict([(k, (v / self.num_gpus)) for k, v in zip(list(self.stats.keys()), stat_list[0])])
+        stats = torch.stack(list(self.stats.values()), dim=0)
+        xm.all_reduce('sum', stats, scale=1.0 / xm.xrt_world_size())
+        # torch.distributed.reduce_multigpu(stats, dst=0)
+        self.stats = OrderedDict([(k, v) for k, v in zip(list(self.stats.keys()), stats)])
 
     def ema(self, ema_beta=0.99):
         for p_ema, p in zip(self.g_ema.parameters(), self.g_.parameters()):
@@ -495,7 +497,8 @@ class Trainer():
     def update_ada(self):
         cfg = self.cfg.ADA
         if self.num_gpus > 1:
-            torch.distributed.all_reduce(self.ada_moments)
+            # torch.distributed.all_reduce(self.ada_moments)
+            xm.all_reduce('sum', self.ada_moments)
 
         ada_sign = (self.ada_moments[1] / self.ada_moments[0]).cpu().numpy()
         adjust = np.sign(ada_sign - cfg.target) * (self.batch_gpu * self.num_gpus * cfg.interval) / (cfg.kimg * 1000)
@@ -510,54 +513,93 @@ class Trainer():
             loader = torch.utils.data.DataLoader(
                 self.train_ds,
                 batch_size=bs_gpu,
-                sampler=get_sampler(self.train_ds, eval=True, num_gpus=self.num_gpus)
+                sampler=get_sampler(self.train_ds, eval=True, num_gpus=self.num_gpus, local_rank=self.local_rank)
             )
             self._samples = {k: v.to(self.device) for k, v in next(iter(loader)).items()}
-            self.real_samples = {k: self.all_gather(v) for k, v in self._samples.items()}
+            self.real_samples = {k: xm.all_gather(v) for k, v in self._samples.items()}
             _samples = [self.real_samples[k] for k in self.cfg.classes]
             samples = torch.stack(_samples, dim=1).flatten(0, 1)
-            save_image(
+            grid = make_grid(
                 samples,
-                self.outdir / 'samples' / f'real.png',
                 nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
                 normalize=True,
                 value_range=(-1, 1),
-            )
+            ).cpu()
+
+            if not xm.is_master_ordinal():
+                xm.rendezvous('sampling-real')
+
+            filepath = self.outdir / 'samples' / f'real.png'
+            if not filepath.exists():
+                grid = grid.numpy().transpose(1, 2, 0) * 255.
+                grid = np.clip(grid, 0, 255).astype(np.uint8)
+                io.imsave(filepath, grid)
+                
+            if xm.is_master_ordinal():
+                xm.rendezvous('sampling-real')
 
         z = [torch.randn([self._samples['target'].shape[0], self.g_ema.z_dim], device=self.device)]
         with torch.no_grad():
             _fake_imgs = self.g_ema(z, None, noise_mode='const')
 
-        fake_imgs = {}
-        for cn, x in _fake_imgs.items():
-            fake_imgs[cn] = self.all_gather(x)[:self.cfg.n_sample]
-            if self.local_rank == 0:
-                assert fake_imgs[cn].shape[0] == self.cfg.n_sample
+        fake_imgs = {k: xm.all_gather(v)[:self.cfg.n_sample] for k, v in _fake_imgs.items()}
 
-        if self.local_rank == 0:
-            _samples = [fake_imgs[k] for k in self.cfg.classes]
-            samples = torch.stack(_samples, dim=1).flatten(0, 1)
-            save_image(
-                samples,
-                self.outdir / 'samples' / f'fake-{i :06d}.png',
-                nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
-                normalize=True,
-                value_range=(-1, 1),
-            )
+        _samples = [fake_imgs[k] for k in self.cfg.classes]
+        samples = torch.stack(_samples, dim=1).flatten(0, 1)
+        grid = make_grid(
+            samples,
+            nrow=int(self.cfg.n_sample ** 0.5) * len(_samples),
+            normalize=True,
+            value_range=(-1, 1),
+        ).cpu()
+        if not xm.is_master_ordinal():
+            xm.rendezvous('sampling-fake')
 
-    def all_gather(self, tensor, dim=0):
-        """ All gather `tensor` and concatenate along `cat_dim`. """
-        if self.num_gpus == 1:
-            return tensor
+        filepath = self.outdir / 'samples' / f'fake-{i :06d}.png'
+        if not filepath.exists():
+            grid = grid.numpy().transpose(1, 2, 0) * 255.
+            grid = np.clip(grid, 0, 255).astype(np.uint8)
+            io.imsave(filepath, grid)
 
-        gather_list = [torch.zeros_like(tensor) for _ in range(self.num_gpus)]
-        torch.distributed.all_gather(gather_list, tensor)
-
-        return torch.cat(gather_list, dim=dim)
+        if xm.is_master_ordinal():
+            xm.rendezvous('sampling-fake')
 
     def clear(self):
         if getattr(self, 'pbar', None):
             self.pbar.close()
+
+
+def get_output_dir(cfg, args, wandb_id=None) -> Path:
+    """ Get output folder name
+        1. Decide serial No. (the biggest + 1)
+        2. concat unique ID produced by weight & bias
+        3. concat name defined by user (in configuration file)
+    """
+    root = Path(cfg.out_root)
+    if not root.exists():
+        print('populate {} as experiment root directory'.format(root))
+        root.mkdir(parents=True)
+
+    exp_name = ''
+    existing_serial_num = [int(x.name[:5]) for x in root.glob("[0-9]" * 5 + "-*") if x.is_dir()]
+    serial_num = max(existing_serial_num) + 1 if existing_serial_num else 0
+    exp_name += str(serial_num).zfill(5)
+
+    if wandb_id is not None:
+        exp_name += f'-{wandb_id}'
+
+    cfg_name = cfg.name if cfg.name else 'default'
+    exp_name += f'-{cfg_name}'
+    outdir = root / exp_name
+    outdir.mkdir(parents=True)
+    (outdir / 'samples').mkdir()
+    (outdir / 'checkpoints').mkdir()
+    return outdir
+
+def mp_fn(index, cfg, args):
+    args.local_rank = index
+    trainer = Trainer(cfg, **vars(args))
+    trainer.train()
 
 
 if __name__ == "__main__":
@@ -566,18 +608,31 @@ if __name__ == "__main__":
     if args.cfg:
         cfg.merge_from_file(args.cfg)
     delattr(args, 'cfg')
-
-    num_gpus = torch.cuda.device_count()
-    if num_gpus > 1:
-        assert torch.distributed.is_available()
-        assert 0 <= args.local_rank < num_gpus
-        torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(
-            backend='nccl', init_method='env://', rank=args.local_rank, world_size=num_gpus)
-
-        assert torch.distributed.is_initialized()
-        torch.distributed.barrier(device_ids=[args.local_rank])
-
     cfg.freeze()
+
+    wandb_id = None
+    if args.use_wandb:
+        if 'WANDB_RESUME' in os.environ and os.environ['WANDB_RESUME'] == 'must':
+            # resume training. reuse run id
+            wandb_id = os.environ['WANDB_RUN_ID']
+        else:
+            wandb_id = wandb.util.generate_id()
+    args.outdir = get_output_dir(cfg, args, wandb_id=wandb_id)
+
+    if 'XRT_TPU_CONFIG' in os.environ:  # TPU
+        num_cores = 8# len(xm.get_xla_supported_devices(devkind='TPU'))
+        if num_cores > 1:
+            xmp.spawn(mp_fn, args=(cfg, args,), nprocs=num_cores, start_method='fork')
+            sys.exit(0)
+    # elif num_gpus > 1:
+    #     assert torch.distributed.is_available()
+    #     assert 0 <= args.local_rank < num_gpus
+    #     torch.cuda.set_device(args.local_rank)
+    #     torch.distributed.init_process_group(
+    #         backend='nccl', init_method='env://', rank=args.local_rank, world_size=num_gpus)
+
+    #     assert torch.distributed.is_initialized()
+    #     torch.distributed.barrier(device_ids=[args.local_rank])
+
     trainer = Trainer(cfg, **vars(args))
     trainer.train()
